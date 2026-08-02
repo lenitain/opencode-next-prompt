@@ -36,8 +36,8 @@ Restart opencode. The package and its dependencies are installed automatically.
 
 | Key | Default | Description |
 |---|---|---|
-| `acceptKey` | `right` | Key to accept the suggestion (only effective while the input is empty) |
-| `position` | `left` | Where the suggestion shows: `left` inside the input; `right` below-right of the input |
+| `acceptKey` | `down` | Key to accept the suggestion (only effective while the input is empty) |
+| `position` | `right` | Where the suggestion shows: `left` inside the input; `right` below-right of the input |
 | `timeoutMs` | `20000` | Per-prediction timeout; the suggestion is dropped on timeout |
 
 ## How it works

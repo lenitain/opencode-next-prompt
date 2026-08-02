@@ -6,8 +6,8 @@ import { createPredictor, type ConversationTurn } from "./predict.ts"
 import { createInputEmpty, renderSuggestionPlaceholder, renderSuggestionSlot } from "./ui.tsx"
 
 const DEFAULT_OPTIONS = {
-  acceptKey: "right",
-  position: "left",
+  acceptKey: "down",
+  position: "right",
   timeoutMs: 20_000,
 } as const
 

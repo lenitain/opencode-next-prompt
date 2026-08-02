@@ -8,30 +8,18 @@ export type PredictOptions = {
 
 const TITLE = "next-prompt-suggestion"
 
-const PROMPT = `You are generating a suggested next user message for an AI coding assistant conversation.
-The conversation below is oldest first; the assistant just finished replying.
+const PROMPT = `You are the user in a conversation with an AI coding assistant. The
+assistant just finished replying to your latest message.
 
-Goal:
-- Suggest a useful next step that keeps momentum.
+Write your next message — your natural reaction to what you just read.
+Address the assistant directly: a request, a question, or an instruction
+(the assistant acts; you never describe doing things yourself). React to
+what was said, not to how it was said. One line, natural and brief, in
+your language and tone.
 
-Rules:
-- Output exactly one line, 170 characters max. Be concise.
-- Write as the user speaking to the assistant (for example: "Can you...", "Help me...", "Let's...").
-- Match the user's tone and language; keep it natural and human.
-- Prefer a concrete action over a broad question.
-- If the conversation is vague or small-talk, steer toward a practical starter request.
-- If there is no meaningful or appropriate next step to suggest, output exactly: NO_SUGGESTION
-- Avoid corporate or robotic phrasing.
-- Avoid asking multiple discovery questions in one sentence.
-- Do not include quotes, labels, markdown, or explanations.
+If nothing plausible remains to say, reply with exactly: NO_SUGGESTION
 
-Examples:
-- Greeting context -> "Can you scan this repo and suggest the best first task to tackle?"
-- Bug-fix context -> "Can you reproduce this bug and propose the smallest safe fix?"
-- Feature context -> "Let's implement this incrementally; start with the MVP version first."
-- Conversation is complete -> "NO_SUGGESTION"
-
-Conversation:
+Conversation (oldest first):
 `
 
 const MAX_PREDICTION_CHARS = 170
