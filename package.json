@@ -1,6 +1,6 @@
 {
   "name": "opencode-next-prompt",
-  "version": "0.0.6",
+  "version": "0.0.7",
   "description": "Predicts your next message after the assistant replies in OpenCode \u2014 accept it with the right arrow",
   "type": "module",
   "exports": {

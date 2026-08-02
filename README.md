@@ -1,6 +1,6 @@
 # opencode-next-prompt
 
-Predicts your next message after the assistant replies and shows it at the prompt — accept it with the right arrow (like Claude Code's "next message suggestion").
+Predicts your next message after the assistant replies and shows it at the prompt — accept it with a keypress (like Claude Code's "next message suggestion").
 
 ## Install
 
