@@ -1,0 +1,39 @@
+{
+  "name": "opencode-next-prompt",
+  "version": "0.0.1",
+  "description": "Predicts your next message after the assistant replies in OpenCode — accept it with the right arrow",
+  "type": "module",
+  "exports": {
+    "./tui": {
+      "import": "./dist/index.js",
+      "types": "./dist/index.d.ts"
+    }
+  },
+  "files": [
+    "dist",
+    "README.md",
+    "LICENSE"
+  ],
+  "scripts": {
+    "build": "deno task build",
+    "check": "deno task check"
+  },
+  "engines": {
+    "opencode": ">=1.18.0"
+  },
+  "dependencies": {
+    "@opentui/core": "0.4.5",
+    "@opentui/solid": "0.4.5",
+    "solid-js": "1.9.12"
+  },
+  "peerDependencies": {
+    "@opencode-ai/plugin": ">=1.0.0"
+  },
+  "devDependencies": {
+    "@opencode-ai/plugin": "^1.0.0",
+    "bun-types": "^1.2.0",
+    "typescript": "^5.5.0"
+  },
+  "keywords": ["opencode-plugin", "tui", "suggestion", "prediction"],
+  "license": "MIT"
+}
