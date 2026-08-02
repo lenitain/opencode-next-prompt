@@ -4,7 +4,7 @@ Predicts your next message after the assistant replies and shows it at the promp
 
 ## Install
 
-Add to `~/.config/opencode/opencode.jsonc` (or the project-level `opencode.json`):
+Add to `~/.config/opencode/tui.json`:
 
 ```json
 {
@@ -13,6 +13,8 @@ Add to `~/.config/opencode/opencode.jsonc` (or the project-level `opencode.json`
 ```
 
 Restart opencode. The package and its dependencies are installed automatically.
+
+> TUI plugins are declared in `tui.json`; the `plugin` array in `opencode.jsonc` is for server plugins (e.g. opencode-polkit).
 
 ## Usage
 
