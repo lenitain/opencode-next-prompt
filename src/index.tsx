@@ -3,17 +3,15 @@ import type { JSX } from "@opentui/solid"
 import { InputRenderable } from "@opentui/core"
 import { createSuggestionStore } from "./state.ts"
 import { createPredictor, type ConversationTurn } from "./predict.ts"
-import { createInputEmpty, renderSuggestionPlaceholder, renderSuggestionSlot } from "./ui.tsx"
+import { renderSuggestionPlaceholder } from "./ui.tsx"
 
 const DEFAULT_OPTIONS = {
   acceptKey: "down",
-  position: "right",
   timeoutMs: 20_000,
 } as const
 
 type Options = {
   acceptKey: string
-  position: "left" | "right"
   timeoutMs: number
 }
 
@@ -128,16 +126,12 @@ const opencodeNextPrompt: TuiPlugin = async (api, rawOptions) => {
     ],
   })
 
-  const inputEmpty = options.position === "right" ? createInputEmpty(api) : undefined
-
   api.slots.register(
     {
       id: "opencode-next-prompt",
       slots: {
         session_prompt_right: (ctx: TuiSlotContext, props: Parameters<typeof renderSuggestionPlaceholder>[1]) =>
-          options.position === "right"
-            ? renderSuggestionSlot(ctx, props, store.read, options.acceptKey, inputEmpty!)
-            : renderSuggestionPlaceholder(api, props, store.read, options.acceptKey),
+          renderSuggestionPlaceholder(api, props, store.read, options.acceptKey),
       },
     } as unknown as Parameters<typeof api.slots.register>[0],
   )

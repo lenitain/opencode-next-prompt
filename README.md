@@ -19,7 +19,7 @@ Restart opencode. The package and its dependencies are installed automatically.
 ## Usage
 
 - After each reply, a suggested next message appears at the input in gray
-- Press **→** while the input is empty to accept it; with text in the input, → keeps its normal cursor behavior
+- Press the accept key (**↓** by default) while the input is empty to fill it; with text in the input, the key keeps its normal cursor behavior
 - Typing hides the suggestion; clearing the input re-shows it
 
 ## Config
@@ -37,7 +37,6 @@ Restart opencode. The package and its dependencies are installed automatically.
 | Key | Default | Description |
 |---|---|---|
 | `acceptKey` | `down` | Key to accept the suggestion (only effective while the input is empty) |
-| `position` | `right` | Where the suggestion shows: `left` inside the input; `right` below-right of the input |
 | `timeoutMs` | `20000` | Per-prediction timeout; the suggestion is dropped on timeout |
 
 ## How it works
