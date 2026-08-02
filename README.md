@@ -27,8 +27,7 @@ Restart opencode. The package and its dependencies are installed automatically.
 ```json
 {
   "plugin": [["opencode-next-prompt", {
-    "acceptKey": "right",
-    "position": "left",
+    "acceptKey": "down",
     "timeoutMs": 20000
   }]]
 }
