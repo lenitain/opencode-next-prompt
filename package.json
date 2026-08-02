@@ -1,7 +1,7 @@
 {
   "name": "opencode-next-prompt",
-  "version": "0.0.1",
-  "description": "Predicts your next message after the assistant replies in OpenCode — accept it with the right arrow",
+  "version": "0.0.2",
+  "description": "Predicts your next message after the assistant replies in OpenCode \u2014 accept it with the right arrow",
   "type": "module",
   "exports": {
     "./tui": {
@@ -34,7 +34,12 @@
     "bun-types": "^1.2.0",
     "typescript": "^5.5.0"
   },
-  "keywords": ["opencode-plugin", "tui", "suggestion", "prediction"],
+  "keywords": [
+    "opencode-plugin",
+    "tui",
+    "suggestion",
+    "prediction"
+  ],
   "license": "MIT",
   "repository": {
     "type": "git",
