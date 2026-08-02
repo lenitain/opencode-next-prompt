@@ -35,5 +35,12 @@
     "typescript": "^5.5.0"
   },
   "keywords": ["opencode-plugin", "tui", "suggestion", "prediction"],
-  "license": "MIT"
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/lenitain/opencode-next-prompt.git"
+  },
+  "bugs": {
+    "url": "https://github.com/lenitain/opencode-next-prompt/issues"
+  }
 }
