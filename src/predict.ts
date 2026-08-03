@@ -4,7 +4,11 @@ export type ConversationTurn = { id: string; role: "user" | "assistant"; text: s
 
 export type PredictOptions = {
   timeoutMs: number
+  model?: string
+  disableTools?: boolean
 }
+
+export type PredictResult = { ok: true; text: string | null } | { ok: false }
 
 const TITLE = "next-prompt-suggestion"
 
@@ -23,12 +27,19 @@ Conversation (oldest first):
 `
 
 const MAX_PREDICTION_CHARS = 170
+const MAX_TURNS = 8
+const MAX_TURN_CHARS = 800
+
+const DENY_ALL_TOOLS: { permission: string; pattern: string; action: "deny" }[] = [
+  { permission: "*", pattern: "*", action: "deny" },
+]
 
 export type Predictor = {
   predict(
     model: { providerID: string; id: string } | undefined,
     turns: ConversationTurn[],
-  ): Promise<string | null>
+    variant?: string,
+  ): Promise<PredictResult>
   dispose(): Promise<void>
 }
 
@@ -38,51 +49,45 @@ export function createPredictor(
   options: PredictOptions,
 ): Predictor {
   let sessionID: string | undefined
-  let predictedTurns = 0
-  let predictedLastMessageID: string | undefined
-  let accumulatedChars = 0
 
   const deleteSession = async (): Promise<void> => {
     if (sessionID) {
-      await client.session.delete({ sessionID, directory }).catch(() => {})
+      const current = sessionID
       sessionID = undefined
-      predictedTurns = 0
-      predictedLastMessageID = undefined
-      accumulatedChars = 0
+      await client.session.abort({ sessionID: current, directory }).catch(() => {})
+      await client.session.delete({ sessionID: current, directory }).catch(() => {})
     }
   }
 
   return {
-    async predict(model, turns) {
-      const expectedID = turns[predictedTurns - 1]?.id
-      if (predictedLastMessageID && expectedID && expectedID !== predictedLastMessageID) {
+    async predict(model, turns, variant) {
+      if (turns.length === 0) return { ok: true, text: null }
+      const input = PROMPT + renderConversation(turns)
+      const ref = resolveModel(options.model, model)
+      const created = await client.session.create({
+        directory,
+        title: TITLE,
+        model: ref ? { id: ref.id, providerID: ref.providerID, ...(variant ? { variant } : {}) } : undefined,
+        permission: options.disableTools === false ? undefined : DENY_ALL_TOOLS,
+      })
+      if (created.error) throw created.error
+      sessionID = created.data.id
+      const currentSessionID = sessionID
+      let text: string | null
+      try {
+        const result = await withTimeout(
+          client.session.prompt({ sessionID, directory, parts: [{ type: "text", text: input }] }),
+          options.timeoutMs,
+          () => void client.session.abort({ sessionID: currentSessionID, directory }).catch(() => {}),
+        )
+        if (result.error) throw result.error
+        text = parsePrediction(result.data.parts)
+      } catch (error) {
         await deleteSession()
+        throw error
       }
-      let delta = turns.slice(predictedTurns)
-      if (delta.length === 0) return null
-
-      let input = PROMPT + renderConversation(delta)
-      if (sessionID && accumulatedChars + input.length > MAX_ACCUMULATED_CHARS) {
-        await deleteSession()
-        delta = turns
-        input = PROMPT + renderConversation(delta)
-      }
-
-      if (!sessionID) {
-        const created = await client.session.create({ directory, title: TITLE, model })
-        if (created.error) throw created.error
-        sessionID = created.data.id
-      }
-
-      const result = await withTimeout(
-        client.session.prompt({ sessionID, directory, parts: [{ type: "text", text: input }] }),
-        options.timeoutMs,
-      )
-      if (result.error) throw result.error
-      predictedTurns = turns.length
-      predictedLastMessageID = turns.at(-1)?.id
-      accumulatedChars += input.length
-      return parsePrediction(result.data.parts)
+      await deleteSession()
+      return { ok: true, text }
     },
 
     async dispose() {
@@ -91,21 +96,31 @@ export function createPredictor(
   }
 }
 
-const MAX_ASSISTANT_MESSAGES = 10
-const MAX_ACCUMULATED_CHARS = 80_000
+function resolveModel(
+  spec: string | undefined,
+  sessionModel: { providerID: string; id: string } | undefined,
+): { providerID: string; id: string } | undefined {
+  if (!spec) return sessionModel
+  const slash = spec.indexOf("/")
+  if (slash > 0 && slash < spec.length - 1) {
+    return { providerID: spec.slice(0, slash), id: spec.slice(slash + 1) }
+  }
+  return sessionModel ? { providerID: sessionModel.providerID, id: spec } : undefined
+}
 
 function renderConversation(turns: ConversationTurn[]): string {
-  const assistantCount = turns.reduce((count, turn) => count + (turn.role === "assistant" ? 1 : 0), 0)
-  const skip = Math.max(0, assistantCount - MAX_ASSISTANT_MESSAGES)
-  let skipped = 0
-  return turns
-    .filter((turn) => {
-      if (turn.role !== "assistant" || skipped >= skip) return true
-      skipped += 1
-      return false
-    })
-    .map((turn) => `${turn.role}: ${turn.text}`)
-    .join("\n")
+  if (turns.length === 0) return ""
+  const recent = turns.slice(-MAX_TURNS)
+  const lines = recent.map((turn) => `${turn.role}: ${truncate(turn.text, MAX_TURN_CHARS)}`)
+  const first = turns[0]
+  if (turns.length > MAX_TURNS && first?.role === "user" && first.id !== recent[0]?.id) {
+    lines.unshift(`user: [original goal] ${truncate(first.text, MAX_TURN_CHARS)}`)
+  }
+  return lines.join("\n")
+}
+
+function truncate(text: string, max: number): string {
+  return text.length > max ? text.slice(0, max - 1) + "…" : text
 }
 
 function parsePrediction(parts: Part[]): string | null {
@@ -125,10 +140,13 @@ function parsePrediction(parts: Part[]): string | null {
   return text.length > MAX_PREDICTION_CHARS ? text.slice(0, MAX_PREDICTION_CHARS - 3) + "..." : text
 }
 
-function withTimeout<T>(promise: Promise<T>, ms: number): Promise<T> {
+function withTimeout<T>(promise: Promise<T>, ms: number, onTimeout: () => void): Promise<T> {
   let timer: ReturnType<typeof setTimeout> | undefined
   const timeout = new Promise<never>((_, reject) => {
-    timer = setTimeout(() => reject(new Error(`prediction timed out after ${ms}ms`)), ms)
+    timer = setTimeout(() => {
+      onTimeout()
+      reject(new Error(`prediction timed out after ${ms}ms`))
+    }, ms)
   })
   return Promise.race([promise, timeout]).finally(() => clearTimeout(timer))
 }

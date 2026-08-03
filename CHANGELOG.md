@@ -5,6 +5,24 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.0.8] - 2026-08-03
+
+### Fixed
+
+- **Retry after failure**: a failed or timed-out prediction no longer marks the turn as predicted — it is retried once, so a transient error does not suppress suggestions for the rest of the turn
+- **Undo / message removal**: each prediction now runs in a fresh background session, so undo, edits, and compaction can never leave predictions stuck on a stale prefix
+- **Real timeout cancellation**: timing out now aborts the model call (and resets the background session) instead of just dropping the result, so no tokens are burned by orphaned requests
+- **Compaction / session switch cleanup**: a single `invalidate()` now clears the suggestion, the turn markers, and the background session on compaction, session switch, session deletion, and message removal
+- **Symmetric prediction context**: the prompt keeps the last 8 complete turns (plus the original goal) instead of all user messages with only the last 10 assistant messages
+- **Prediction voice**: removed the prompt line that called the transcript "synthetic" (it broke the "you are the user" framing) and stopped reusing a background session whose history contained earlier predictions — both were causing suggestions written from the assistant's perspective
+- **Model config validation**: `model` is checked against the available providers before each prediction; an unknown provider or model now produces a clear error toast and a readable log entry instead of failing silently
+- **Readable failure logs**: prediction errors are now logged with their message instead of being serialized as `{}`
+
+### Added
+
+- **Config options**: `model` (fast prediction model), `variant` (reasoning effort — auto-picks the lowest variant the model supports, e.g. `low`, or none when unsupported), `disableTools` (default `true`), `includeToolContext` (default `false`)
+- **npm description**: now says "down arrow" to match the default accept key and README
+
 ## [0.0.7] - 2026-08-02
 
 ### Fixed

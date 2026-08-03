@@ -28,7 +28,10 @@ Restart opencode. The package and its dependencies are installed automatically.
 {
   "plugin": [["opencode-next-prompt", {
     "acceptKey": "down",
-    "timeoutMs": 20000
+    "timeoutMs": 20000,
+    "model": "my-provider/fast-model",
+    "disableTools": true,
+    "includeToolContext": false
   }]]
 }
 ```
@@ -36,11 +39,17 @@ Restart opencode. The package and its dependencies are installed automatically.
 | Key | Default | Description |
 |---|---|---|
 | `acceptKey` | `down` | Key to accept the suggestion (only effective while the input is empty) |
-| `timeoutMs` | `20000` | Per-prediction timeout; the suggestion is dropped on timeout |
+| `timeoutMs` | `20000` | Per-prediction timeout; the timed-out call is aborted and retried once |
+| `model` | unset | Fast model for predictions as `provider/model`; a bare model id uses the session's provider. Defaults to the current session's model. Unknown providers/models are rejected with an error toast and a log entry |
+| `variant` | auto | Model variant (reasoning effort) used for predictions. By default the lowest variant the model supports is picked automatically (e.g. `low`); models without variants are left untouched. Set it explicitly (e.g. `"high"`) to override, or `"default"` to disable |
+| `disableTools` | `true` | Denies all tools in the background predictor session (predictions never run code or search) |
+| `includeToolContext` | `false` | Include summarized tool calls and outputs in the prediction context (more context, more tokens) |
 
 ## How it works
 
-After each reply, the plugin predicts your next input in a background session that reuses the conversation prefix — each prediction only processes the new content, so it stays fast regardless of conversation length. The suggestion is written into the input placeholder, so what you see is exactly what gets accepted. The main conversation is never modified.
+After each reply, the plugin predicts your next input in a fresh background session built from the recent conversation (the last few turns plus the original goal). The suggestion is written into the input placeholder, so what you see is exactly what gets accepted. The main conversation is never modified.
+
+Each suggestion costs one extra model call, and the background session is created and removed per prediction, so the model never sees its own previous predictions (which would bias the next one). Failed or timed-out predictions are retried once. A suggestion disappears when you type or when the session changes.
 
 ## License
 
