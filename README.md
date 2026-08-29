@@ -19,7 +19,7 @@ Restart opencode. The package and its dependencies are installed automatically.
 ## Usage
 
 - After each reply, a suggested next message appears at the input in gray
-- Press the accept key (**↓** by default) while the input is empty to fill it; with text in the input, the key keeps its normal cursor behavior
+- Press the accept key (**→** by default) while the input is empty to fill it; with text in the input, the key keeps its normal cursor behavior
 - Typing hides the suggestion; clearing the input re-shows it
 
 ## Config
@@ -27,7 +27,7 @@ Restart opencode. The package and its dependencies are installed automatically.
 ```json
 {
   "plugin": [["opencode-next-prompt", {
-    "acceptKey": "down",
+    "acceptKey": "right",
     "timeoutMs": 20000,
     "model": "my-provider/fast-model",
     "disableTools": true,
@@ -38,7 +38,7 @@ Restart opencode. The package and its dependencies are installed automatically.
 
 | Key | Default | Description |
 |---|---|---|
-| `acceptKey` | `down` | Key to accept the suggestion (only effective while the input is empty) |
+| `acceptKey` | `right` | Key to accept the suggestion (only effective while the input is empty) |
 | `timeoutMs` | `20000` | Per-prediction timeout; the timed-out call is aborted and retried once |
 | `model` | unset | Fast model for predictions as `provider/model`; a bare model id uses the session's provider. Defaults to the current session's model. Unknown providers/models are rejected with an error toast and a log entry |
 | `variant` | auto | Model variant (reasoning effort) used for predictions. By default the lowest variant the model supports is picked automatically (e.g. `low`); models without variants are left untouched. Set it explicitly (e.g. `"high"`) to override, or `"default"` to disable |
