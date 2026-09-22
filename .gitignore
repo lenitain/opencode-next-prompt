@@ -1,6 +1,5 @@
 node_modules
 dist/
-deno.lock
 *.tgz
 .env
 .DS_Store

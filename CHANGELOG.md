@@ -7,9 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.1.0] - 2026-09-22
+
 ### Changed
 
+- **OpenCode 2.0 only**: migrated to the V2 plugin API — `@opencode/plugin@2.0.12` (`Plugin.define` + `setup` context), `@opencode/client@2.0.12`, `@opentui/*@0.5.11`; OpenCode 1.x is no longer supported (`engines.opencode >=2.0.0`, peer deps use the V2 `@opencode/*` package names)
+- **Install config**: TUI plugins are now declared in `~/.config/opencode/cli.json`'s `plugins` array (successor of `tui.json`'s `plugin` array), with options under `{ "package": ..., "options": ... }`
+- **Prediction call**: runs through the tool-free `generate.text` endpoint instead of creating/aborting/deleting a background session — no session churn, no permission rules, and tools can never be involved; the `disableTools` option is removed accordingly
+- **Accept insertion**: fills the prompt by driving the editor directly (`insertText` + end-of-buffer), the same path OpenCode itself uses for the `tui.prompt.append` event
+- **Event handling**: `message.removed` / `message.part.removed` (absent in V2) are replaced by `session.revert.committed`; compaction is covered by discarding on the busy status
+- **Debug logging**: `client.app.log` (removed in V2) is replaced by an opt-in `globalThis.NEXT_PROMPT_DEBUG` console logger, off by default so the TUI is never corrupted
 - **Default accept key**: `right` arrow instead of `down` arrow (README, npm description, and placeholder hint updated to match)
+- **Build toolchain**: deno → bun (`bun run check` = `tsc --noEmit`, `bun run build` = `bun tools/build.ts`); `deno.json`/`deno.lock` replaced by `tsconfig.json`/`bun.lock`
 
 ## [0.0.8] - 2026-08-03
 

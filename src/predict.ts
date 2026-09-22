@@ -1,16 +1,14 @@
-import type { OpencodeClient, Part } from "@opencode-ai/sdk/v2"
+import type { ModelRef, OpenCodeClient } from "@opencode/client"
+import { debug } from "./debug.ts"
 
 export type ConversationTurn = { id: string; role: "user" | "assistant"; text: string }
 
 export type PredictOptions = {
   timeoutMs: number
   model?: string
-  disableTools?: boolean
 }
 
 export type PredictResult = { ok: true; text: string | null } | { ok: false }
-
-const TITLE = "next-prompt-suggestion"
 
 const PROMPT = `You are the user in a conversation with an AI coding assistant. The
 assistant just finished replying to your latest message.
@@ -30,75 +28,85 @@ const MAX_PREDICTION_CHARS = 170
 const MAX_TURNS = 8
 const MAX_TURN_CHARS = 800
 
-const DENY_ALL_TOOLS: { permission: string; pattern: string; action: "deny" }[] = [
-  { permission: "*", pattern: "*", action: "deny" },
-]
-
 export type Predictor = {
-  predict(
-    model: { providerID: string; id: string } | undefined,
-    turns: ConversationTurn[],
-    variant?: string,
-  ): Promise<PredictResult>
+  predict(model: ModelRef | undefined, turns: ConversationTurn[], variant?: string): Promise<PredictResult>
   dispose(): Promise<void>
 }
 
-export function createPredictor(
-  client: OpencodeClient,
-  directory: string | undefined,
-  options: PredictOptions,
-): Predictor {
-  let sessionID: string | undefined
-
-  const deleteSession = async (): Promise<void> => {
-    if (sessionID) {
-      const current = sessionID
-      sessionID = undefined
-      await client.session.abort({ sessionID: current, directory }).catch(() => {})
-      await client.session.delete({ sessionID: current, directory }).catch(() => {})
-    }
-  }
-
+/**
+ * Prediction runs through the tool-free `generate.text` endpoint: no session
+ * is created, so there is nothing to abort or clean up beyond the request
+ * itself, which is cancelled by an AbortSignal on timeout.
+ *
+ * Model fallback: some gates — notably OpenCode's free tier — reject
+ * explicitly selected models on this endpoint (503) while letting the server
+ * default through, so a failed call with a specified model is retried once
+ * without a model instead of failing the whole prediction. Both attempts
+ * share one timeout budget.
+ */
+export function createPredictor(client: OpenCodeClient, options: PredictOptions): Predictor {
   return {
     async predict(model, turns, variant) {
       if (turns.length === 0) return { ok: true, text: null }
-      const input = PROMPT + renderConversation(turns)
+      const prompt = PROMPT + renderConversation(turns)
       const ref = resolveModel(options.model, model)
-      const created = await client.session.create({
-        directory,
-        title: TITLE,
-        model: ref ? { id: ref.id, providerID: ref.providerID, ...(variant ? { variant } : {}) } : undefined,
-        permission: options.disableTools === false ? undefined : DENY_ALL_TOOLS,
-      })
-      if (created.error) throw created.error
-      sessionID = created.data.id
-      const currentSessionID = sessionID
-      let text: string | null
-      try {
-        const result = await withTimeout(
-          client.session.prompt({ sessionID, directory, parts: [{ type: "text", text: input }] }),
-          options.timeoutMs,
-          () => void client.session.abort({ sessionID: currentSessionID, directory }).catch(() => {}),
-        )
-        if (result.error) throw result.error
-        text = parsePrediction(result.data.parts)
-      } catch (error) {
-        await deleteSession()
-        throw error
+      const deadline = Date.now() + options.timeoutMs
+
+      const attempt = async (spec: { providerID: string; id: string; variant?: string } | undefined): Promise<PredictResult> => {
+        const remaining = deadline - Date.now()
+        if (remaining <= 0) return { ok: false }
+        const controller = new AbortController()
+        const timer = setTimeout(() => controller.abort(), remaining)
+        try {
+          const result = await client.generate.text({ prompt, model: spec }, { signal: controller.signal })
+          return { ok: true, text: parsePrediction(result.text) }
+        } finally {
+          clearTimeout(timer)
+        }
       }
-      await deleteSession()
-      return { ok: true, text }
+
+      const spec = ref ? { providerID: ref.providerID, id: ref.id, ...(variant ? { variant } : {}) } : undefined
+      try {
+        return await attempt(spec)
+      } catch (error) {
+        if (!spec) {
+          debug("generate failed", errorMessage(error))
+          return { ok: false }
+        }
+        debug("generate with explicit model failed, retrying with server default", errorMessage(error))
+      }
+      try {
+        return await attempt(undefined)
+      } catch (error) {
+        debug("generate failed", errorMessage(error))
+        return { ok: false }
+      }
     },
 
     async dispose() {
-      await deleteSession()
+      // Nothing to clean up: predictions do not own a session.
     },
   }
+}
+
+function errorMessage(error: unknown): string {
+  if (error instanceof Error) return error.message
+  if (typeof error === "string") return error
+  if (error && typeof error === "object") {
+    const candidate = (error as { message?: unknown }).message
+    if (typeof candidate === "string") return candidate
+    try {
+      return JSON.stringify(error)
+    } catch {
+      return String(error)
+    }
+  }
+  return String(error)
 }
 
 function resolveModel(
   spec: string | undefined,
-  sessionModel: { providerID: string; id: string } | undefined,
+  sessionModel: ModelRef | undefined,
 ): { providerID: string; id: string } | undefined {
   if (!spec) return sessionModel
   const slash = spec.indexOf("/")
@@ -123,12 +131,9 @@ function truncate(text: string, max: number): string {
   return text.length > max ? text.slice(0, max - 1) + "…" : text
 }
 
-function parsePrediction(parts: Part[]): string | null {
-  const line = parts
-    .filter((part) => part.type === "text")
-    .map((part) => part.text)
-    .join("")
-    .replace(/<think>[\s\S]*?<\/think>\s*/g, "")
+function parsePrediction(raw: string): string | null {
+  const line = raw
+    .replace(/<\/?think>[\s\S]*?<\/think>\s*/g, "")
     .split("\n")
     .map((item) => item.trim())
     .find((item) => item.length > 0)
@@ -138,15 +143,4 @@ function parsePrediction(parts: Part[]): string | null {
   const tag = text.toUpperCase().replace(/[\s-]+/g, "_").replace(/[^A-Z_]/g, "")
   if (tag === "NO_SUGGESTION") return null
   return text.length > MAX_PREDICTION_CHARS ? text.slice(0, MAX_PREDICTION_CHARS - 3) + "..." : text
-}
-
-function withTimeout<T>(promise: Promise<T>, ms: number, onTimeout: () => void): Promise<T> {
-  let timer: ReturnType<typeof setTimeout> | undefined
-  const timeout = new Promise<never>((_, reject) => {
-    timer = setTimeout(() => {
-      onTimeout()
-      reject(new Error(`prediction timed out after ${ms}ms`))
-    }, ms)
-  })
-  return Promise.race([promise, timeout]).finally(() => clearTimeout(timer))
 }
