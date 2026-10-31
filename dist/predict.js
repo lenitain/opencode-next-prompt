@@ -18,16 +18,18 @@ const MAX_TURNS = 8;
 const MAX_TURN_CHARS = 800;
 const TITLE = "next-prompt-suggestion";
 const DENY_ALL_TOOLS = [{ action: "*", resource: "*", effect: "deny" }];
+const CLEANUP_TIMEOUT_MS = 5_000;
 /**
- * Prediction runs through a lightweight, tool-denied helper session in the active
- * session's `Location` using `session.generate` (`POST /api/session/:sessionID/generate`):
- * - `location` ensures project-scoped providers and models in `opencode.jsonc` resolve.
+ * Prediction runs through a lightweight, tool-denied child helper session using
+ * `session.generate` (`POST /api/session/:sessionID/generate`):
+ * - `parentID` inherits the active session's exact `Location`, so project-scoped
+ *   providers and models in `opencode.jsonc` resolve (including workspaces).
  * - `permissions: [{ action: "*", resource: "*", effect: "deny" }]` strips all MCP tools,
  *   skills, and MCP instructions from the request context.
  * - `model: spec` applies the resolved fast/small model (e.g. `agents["next-prompt"].model`
  *   or `agents.title.model`) and minimal/low reasoning variant.
- * - `session.generate` writes no messages and emits no execution events, and the empty
- *   helper session is removed immediately after the call completes.
+ * - `session.generate` writes no messages and emits no execution events; the empty
+ *   helper session is removed in the background after the call completes.
  */
 export function createPredictor(client, options) {
     let activeHelperSessionID;
@@ -36,17 +38,25 @@ export function createPredictor(client, options) {
             return;
         if (activeHelperSessionID === id)
             activeHelperSessionID = undefined;
-        if (typeof client.session?.remove === "function") {
-            await client.session.remove({ sessionID: id }).catch(() => { });
+        if (typeof client.session?.remove !== "function")
+            return;
+        const controller = new AbortController();
+        const timer = setTimeout(() => controller.abort(), CLEANUP_TIMEOUT_MS);
+        try {
+            await client.session.remove({ sessionID: id }, { signal: controller.signal }).catch(() => { });
+        }
+        finally {
+            clearTimeout(timer);
         }
     };
     return {
-        async predict(sessionID, model, turns, variant, location) {
+        async predict(sessionID, model, turns, variant) {
             if (turns.length === 0)
                 return { ok: true, text: null };
             const prompt = PROMPT + renderConversation(turns);
-            const ref = resolveModel(options.model, model);
-            const spec = ref ? { providerID: ref.providerID, id: ref.id, ...(variant ? { variant } : {}) } : undefined;
+            const spec = model
+                ? { providerID: model.providerID, id: model.id, ...(variant ? { variant } : {}) }
+                : undefined;
             const deadline = Date.now() + options.timeoutMs;
             const runWithTimeout = async (call) => {
                 const remaining = deadline - Date.now();
@@ -69,8 +79,8 @@ export function createPredictor(client, options) {
                 try {
                     return await runWithTimeout(async (signal) => {
                         const created = await client.session.create({
+                            parentID: sessionID,
                             title: TITLE,
-                            ...(location ? { location: { directory: location.directory } } : {}),
                             ...(spec ? { model: spec } : {}),
                             permissions: DENY_ALL_TOOLS,
                         }, { signal });
@@ -79,7 +89,7 @@ export function createPredictor(client, options) {
                             return await client.session.generate({ sessionID: created.id, prompt }, { signal });
                         }
                         finally {
-                            await removeHelperSession(created.id);
+                            void removeHelperSession(created.id);
                         }
                     });
                 }
@@ -88,16 +98,17 @@ export function createPredictor(client, options) {
                     return { ok: false };
                 }
             }
-            if (options.model && spec && hasGenerateText) {
+            if (spec && hasGenerateText) {
                 try {
                     return await runWithTimeout((signal) => client.generate.text({ prompt, model: spec }, { signal }));
                 }
                 catch (error) {
-                    if (!hasSessionGenerate) {
-                        debug("generate failed", errorMessage(error));
-                        return { ok: false };
+                    if (hasSessionGenerate) {
+                        debug("generate.text with model failed, falling back to session.generate", errorMessage(error));
                     }
-                    debug("generate.text with custom model failed, falling back to session.generate", errorMessage(error));
+                    else {
+                        debug("generate with model failed, retrying with server default", errorMessage(error));
+                    }
                 }
             }
             if (hasSessionGenerate) {
@@ -111,7 +122,7 @@ export function createPredictor(client, options) {
             }
             if (hasGenerateText) {
                 try {
-                    return await runWithTimeout((signal) => client.generate.text({ prompt, model: spec }, { signal }));
+                    return await runWithTimeout((signal) => client.generate.text({ prompt }, { signal }));
                 }
                 catch (error) {
                     debug("generate failed", errorMessage(error));
@@ -143,16 +154,6 @@ function errorMessage(error) {
         }
     }
     return String(error);
-}
-function resolveModel(spec, sessionModel) {
-    if (!spec)
-        return sessionModel;
-    const trimmed = spec.split("#")[0] ?? spec;
-    const slash = trimmed.indexOf("/");
-    if (slash > 0 && slash < trimmed.length - 1) {
-        return { providerID: trimmed.slice(0, slash), id: trimmed.slice(slash + 1) };
-    }
-    return sessionModel ? { providerID: sessionModel.providerID, id: trimmed } : undefined;
 }
 function renderConversation(turns) {
     if (turns.length === 0)

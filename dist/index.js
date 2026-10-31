@@ -69,7 +69,6 @@ const opencodeNextPrompt = Plugin.define({
         let reportedModelIssue;
         const predictor = createPredictor(context.client, {
             timeoutMs: options.timeoutMs,
-            model: options.model,
         });
         const syncActiveSession = () => {
             const current = currentSessionID();
@@ -128,7 +127,7 @@ const opencodeNextPrompt = Plugin.define({
             const selectedModel = modelRef ? { providerID: modelRef.providerID, id: modelRef.id } : session?.model;
             try {
                 debug("predicting", { sessionID, model: selectedModel, variant, source: modelRef?.source });
-                const result = await predictor.predict(sessionID, selectedModel, turns, variant, location);
+                const result = await predictor.predict(sessionID, selectedModel, turns, variant);
                 if (inFlightUserMessageID !== userMessageID)
                     return;
                 debug("predict result", { ok: result.ok, length: result.ok ? (result.text?.length ?? 0) : -1 });
@@ -326,10 +325,11 @@ function parseSpec(spec) {
     return { id: base, variant };
 }
 function resolveModelRef(spec, sessionModel, context, location) {
-    const agentConfig = findConfiguredAgentModel(context, location);
     if (spec) {
         const parsed = parseSpec(spec);
-        const providerID = parsed.providerID ?? agentConfig?.model.providerID ?? sessionModel?.providerID;
+        const providerID = parsed.providerID ??
+            sessionModel?.providerID ??
+            findConfiguredAgentModel(context, location)?.model.providerID;
         if (!providerID || !parsed.id)
             return undefined;
         return {
@@ -341,6 +341,7 @@ function resolveModelRef(spec, sessionModel, context, location) {
             model: findModel(context, providerID, parsed.id, location),
         };
     }
+    const agentConfig = findConfiguredAgentModel(context, location);
     if (agentConfig) {
         const { providerID, id, variant } = agentConfig.model;
         return {
@@ -364,10 +365,10 @@ function resolveModelRef(spec, sessionModel, context, location) {
         model: findModel(context, providerID, modelID, location),
     };
 }
-function findModel(context, providerID, modelID, location) {
+function findModel(context, providerID, id, location) {
     return context.data.location.model
         .list(location)
-        ?.find((item) => item.providerID === providerID && (item.modelID ?? item.id) === modelID);
+        ?.find((item) => item.providerID === providerID && (item.id ?? item.modelID) === id);
 }
 function checkModelConfig(ref, context, location) {
     if (!ref?.explicit)
@@ -378,10 +379,10 @@ function checkModelConfig(ref, context, location) {
         return `model config error: provider "${ref.providerID}" not found${available ? ` (available providers: ${available})` : ""}`;
     }
     const models = context.data.location.model.list(location);
-    if (models && !models.some((item) => item.providerID === ref.providerID && (item.modelID ?? item.id) === ref.id)) {
+    if (models && !models.some((item) => item.providerID === ref.providerID && (item.id ?? item.modelID) === ref.id)) {
         const available = models
             .filter((item) => item.providerID === ref.providerID)
-            .map((item) => item.modelID ?? item.id)
+            .map((item) => item.id ?? item.modelID)
             .slice(0, 10)
             .join(", ");
         const count = models.filter((item) => item.providerID === ref.providerID).length;

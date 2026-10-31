@@ -234,8 +234,8 @@ test("idle triggers prediction, placeholder shows, accept key fills, busy clears
 
   expect(fixture.sessionCreateCalls.length).toBe(1)
   expect(fixture.sessionCreateCalls[0]).toEqual({
+    parentID: SESSION_ID,
     title: "next-prompt-suggestion",
-    location: { directory: "/tmp/e2e" },
     model: { providerID: "acme", id: "fast", variant: "low" },
     permissions: [{ action: "*", resource: "*", effect: "deny" }],
   })

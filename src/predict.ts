@@ -1,11 +1,10 @@
-import type { ModelRef, OpenCodeClient } from "@opencode/client"
+import type { OpenCodeClient } from "@opencode/client"
 import { debug } from "./debug.ts"
 
 export type ConversationTurn = { id: string; role: "user" | "assistant"; text: string }
 
 export type PredictOptions = {
   timeoutMs: number
-  model?: string
 }
 
 export type PredictResult = { ok: true; text: string | null } | { ok: false }
@@ -31,6 +30,7 @@ const MAX_TURN_CHARS = 800
 
 const TITLE = "next-prompt-suggestion"
 const DENY_ALL_TOOLS = [{ action: "*", resource: "*", effect: "deny" as const }]
+const CLEANUP_TIMEOUT_MS = 5_000
 
 export type Predictor = {
   predict(
@@ -38,21 +38,21 @@ export type Predictor = {
     model: { providerID: string; id: string } | undefined,
     turns: ConversationTurn[],
     variant?: string,
-    location?: { directory: string },
   ): Promise<PredictResult>
   dispose(): Promise<void>
 }
 
 /**
- * Prediction runs through a lightweight, tool-denied helper session in the active
- * session's `Location` using `session.generate` (`POST /api/session/:sessionID/generate`):
- * - `location` ensures project-scoped providers and models in `opencode.jsonc` resolve.
+ * Prediction runs through a lightweight, tool-denied child helper session using
+ * `session.generate` (`POST /api/session/:sessionID/generate`):
+ * - `parentID` inherits the active session's exact `Location`, so project-scoped
+ *   providers and models in `opencode.jsonc` resolve (including workspaces).
  * - `permissions: [{ action: "*", resource: "*", effect: "deny" }]` strips all MCP tools,
  *   skills, and MCP instructions from the request context.
  * - `model: spec` applies the resolved fast/small model (e.g. `agents["next-prompt"].model`
  *   or `agents.title.model`) and minimal/low reasoning variant.
- * - `session.generate` writes no messages and emits no execution events, and the empty
- *   helper session is removed immediately after the call completes.
+ * - `session.generate` writes no messages and emits no execution events; the empty
+ *   helper session is removed in the background after the call completes.
  */
 export function createPredictor(client: OpenCodeClient, options: PredictOptions): Predictor {
   let activeHelperSessionID: string | undefined
@@ -60,17 +60,23 @@ export function createPredictor(client: OpenCodeClient, options: PredictOptions)
   const removeHelperSession = async (id: string | undefined): Promise<void> => {
     if (!id) return
     if (activeHelperSessionID === id) activeHelperSessionID = undefined
-    if (typeof client.session?.remove === "function") {
-      await client.session.remove({ sessionID: id }).catch(() => {})
+    if (typeof client.session?.remove !== "function") return
+    const controller = new AbortController()
+    const timer = setTimeout(() => controller.abort(), CLEANUP_TIMEOUT_MS)
+    try {
+      await client.session.remove({ sessionID: id }, { signal: controller.signal }).catch(() => {})
+    } finally {
+      clearTimeout(timer)
     }
   }
 
   return {
-    async predict(sessionID, model, turns, variant, location) {
+    async predict(sessionID, model, turns, variant) {
       if (turns.length === 0) return { ok: true, text: null }
       const prompt = PROMPT + renderConversation(turns)
-      const ref = resolveModel(options.model, model)
-      const spec = ref ? { providerID: ref.providerID, id: ref.id, ...(variant ? { variant } : {}) } : undefined
+      const spec = model
+        ? { providerID: model.providerID, id: model.id, ...(variant ? { variant } : {}) }
+        : undefined
       const deadline = Date.now() + options.timeoutMs
 
       const runWithTimeout = async (call: (signal: AbortSignal) => Promise<{ text: string }>): Promise<PredictResult> => {
@@ -95,8 +101,8 @@ export function createPredictor(client: OpenCodeClient, options: PredictOptions)
           return await runWithTimeout(async (signal) => {
             const created = await client.session.create(
               {
+                parentID: sessionID,
                 title: TITLE,
-                ...(location ? { location: { directory: location.directory } } : {}),
                 ...(spec ? { model: spec } : {}),
                 permissions: DENY_ALL_TOOLS,
               },
@@ -106,7 +112,7 @@ export function createPredictor(client: OpenCodeClient, options: PredictOptions)
             try {
               return await client.session.generate({ sessionID: created.id, prompt }, { signal })
             } finally {
-              await removeHelperSession(created.id)
+              void removeHelperSession(created.id)
             }
           })
         } catch (error) {
@@ -115,15 +121,15 @@ export function createPredictor(client: OpenCodeClient, options: PredictOptions)
         }
       }
 
-      if (options.model && spec && hasGenerateText) {
+      if (spec && hasGenerateText) {
         try {
           return await runWithTimeout((signal) => client.generate.text({ prompt, model: spec }, { signal }))
         } catch (error) {
-          if (!hasSessionGenerate) {
-            debug("generate failed", errorMessage(error))
-            return { ok: false }
+          if (hasSessionGenerate) {
+            debug("generate.text with model failed, falling back to session.generate", errorMessage(error))
+          } else {
+            debug("generate with model failed, retrying with server default", errorMessage(error))
           }
-          debug("generate.text with custom model failed, falling back to session.generate", errorMessage(error))
         }
       }
 
@@ -138,7 +144,7 @@ export function createPredictor(client: OpenCodeClient, options: PredictOptions)
 
       if (hasGenerateText) {
         try {
-          return await runWithTimeout((signal) => client.generate.text({ prompt, model: spec }, { signal }))
+          return await runWithTimeout((signal) => client.generate.text({ prompt }, { signal }))
         } catch (error) {
           debug("generate failed", errorMessage(error))
           return { ok: false }
@@ -168,19 +174,6 @@ function errorMessage(error: unknown): string {
     }
   }
   return String(error)
-}
-
-function resolveModel(
-  spec: string | undefined,
-  sessionModel: { providerID: string; id: string } | undefined,
-): { providerID: string; id: string } | undefined {
-  if (!spec) return sessionModel
-  const trimmed = spec.split("#")[0] ?? spec
-  const slash = trimmed.indexOf("/")
-  if (slash > 0 && slash < trimmed.length - 1) {
-    return { providerID: trimmed.slice(0, slash), id: trimmed.slice(slash + 1) }
-  }
-  return sessionModel ? { providerID: sessionModel.providerID, id: trimmed } : undefined
 }
 
 function renderConversation(turns: ConversationTurn[]): string {
