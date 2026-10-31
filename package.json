@@ -27,13 +27,13 @@
   },
   "packageManager": "bun@1.4.4",
   "engines": {
-    "opencode": ">=2.0.22"
+    "opencode": ">=2.1.4"
   },
   "peerDependencies": {
-    "@opencode/client": ">=2.0.22",
-    "@opencode/plugin": ">=2.0.22",
-    "@opentui/core": ">=0.5.14",
-    "@opentui/solid": ">=0.5.14"
+    "@opencode/client": ">=2.1.4",
+    "@opencode/plugin": ">=2.1.4",
+    "@opentui/core": ">=0.6.0",
+    "@opentui/solid": ">=0.6.0"
   },
   "peerDependenciesMeta": {
     "@opencode/client": {
