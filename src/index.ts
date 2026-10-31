@@ -6,13 +6,10 @@ import { createPredictor } from "./predict.ts"
 import { createPlaceholderController, isShellMode } from "./ui.ts"
 import { asPromptTextarea } from "./editor.ts"
 import { normalizeOptions } from "./options.ts"
-import { resolvePredictionModel } from "./model.ts"
+import { NEXT_PROMPT_AGENT_IDS, resolvePredictionModel } from "./model.ts"
 import { buildPrompt, collectConversation, lastTurnKey } from "./conversation.ts"
 import { debug } from "./debug.ts"
 import { errorMessage } from "./errors.ts"
-
-const RETRY_DELAY_MS = 800
-const MIN_HOST_VERSION: readonly [number, number, number] = [2, 0, 22]
 
 type IdleEventType =
   | "session.execution.succeeded"
@@ -28,22 +25,10 @@ const opencodeNextPrompt = Plugin.define({
     for (const warning of warnings) {
       context.ui.toast.show({ variant: "warning", title: "next-prompt", message: warning, duration: 10_000 })
     }
-    if (!versionAtLeast(context.app.version, MIN_HOST_VERSION)) {
-      context.ui.toast.show({
-        variant: "warning",
-        title: "next-prompt",
-        message: `OpenCode ${context.app.version} is older than 2.0.22; predictions will use a compatibility fallback. Upgrade OpenCode for project-scoped models.`,
-        duration: 12_000,
-      })
-    }
 
     const store = createSuggestionStore()
     let disposed = false
     let activeSessionID: string | undefined = currentSessionID()
-    let inFlightTurnKey: string | undefined
-    let completedTurnKey: string | undefined
-    let retriedTurnKey: string | undefined
-    let retryTimer: ReturnType<typeof setTimeout> | undefined
     let reportedModelIssue: string | undefined
     let reportedModelWarning: string | undefined
 
@@ -66,12 +51,24 @@ const opencodeNextPrompt = Plugin.define({
 
     function promptInputIsEmpty(): boolean {
       const editor = focusedPrompt()
-      return editor !== null && editor.plainText === "" && !isShellMode(context, editor)
+      return editor !== null && editor.plainText === "" && !isShellMode(context)
+    }
+
+    /**
+     * A prediction is valid once the turn is over and no other action is
+     * already decided. Typing, focus, and shell mode are visibility concerns,
+     * not conversation state: they hide the suggestion, they never destroy it.
+     */
+    function decisionPoint(sessionID: string): string | undefined {
+      if (context.data.session.status(sessionID) !== "idle") return "session not idle"
+      if ((context.data.session.permission.list(sessionID)?.length ?? 0) > 0) return "permission pending"
+      if ((context.data.session.form.list(sessionID)?.length ?? 0) > 0) return "form pending"
+      if (context.data.session.pending.list(sessionID).length > 0) return "message queued"
+      return undefined
     }
 
     function requestPrediction(): void {
       if (disposed) return
-      clearRetry()
       void maybePredict().catch((error) => debug("prediction crashed", errorMessage(error)))
     }
 
@@ -98,29 +95,9 @@ const opencodeNextPrompt = Plugin.define({
       context.ui.toast.show({ variant, title: "next-prompt", message, duration: 8_000 })
     }
 
-    function clearRetry(): void {
-      if (retryTimer !== undefined) {
-        clearTimeout(retryTimer)
-        retryTimer = undefined
-      }
-    }
-
-    function scheduleRetry(turnKey: string): void {
-      if (disposed || retriedTurnKey === turnKey) return
-      retriedTurnKey = turnKey
-      clearRetry()
-      retryTimer = setTimeout(() => {
-        retryTimer = undefined
-        if (!disposed) requestPrediction()
-      }, RETRY_DELAY_MS)
-    }
-
+    /** The conversation changed: the suggestion for the old turn is stale. */
     function invalidate(): void {
-      clearRetry()
       store.discard()
-      inFlightTurnKey = undefined
-      completedTurnKey = undefined
-      retriedTurnKey = undefined
       void predictor.dispose()
     }
 
@@ -131,9 +108,10 @@ const opencodeNextPrompt = Plugin.define({
         debug("skip", "no session route")
         return
       }
-      const status = context.data.session.status(sessionID)
-      if (status !== "idle") {
-        debug("skip", { status })
+
+      const blocker = decisionPoint(sessionID)
+      if (blocker) {
+        debug("skip", blocker)
         return
       }
 
@@ -143,8 +121,19 @@ const opencodeNextPrompt = Plugin.define({
         debug("skip", "no user message")
         return
       }
-      if (turnKey === completedTurnKey || turnKey === inFlightTurnKey) {
-        debug("skip", "turn already handled")
+
+      const current = store.read()
+      if (current.kind !== "idle") {
+        if (current.turnKey === turnKey) {
+          debug("skip", "turn already settled")
+          return
+        }
+        invalidate()
+      }
+
+      const conversation = collectConversation(messages, options.includeToolContext)
+      if (conversation.turns.at(-1)?.role !== "assistant") {
+        debug("skip", "no assistant reply")
         return
       }
 
@@ -165,44 +154,32 @@ const opencodeNextPrompt = Plugin.define({
       if (resolution.warning) showModelNotice(resolution.warning, "warning")
       else reportedModelWarning = undefined
 
-      const conversation = collectConversation(messages, options.includeToolContext)
-      if (conversation.turns.length === 0) {
-        debug("skip", "no conversation turns")
-        return
-      }
+      const selected = resolution.model
+        ? { providerID: resolution.model.providerID, id: resolution.model.id, variant: resolution.model.variant }
+        : undefined
+      const agent = (context.data.location.agent?.list(location) ?? []).find((item) =>
+        NEXT_PROMPT_AGENT_IDS.includes(item.id),
+      )?.id
 
-      const generation = store.beginPredict(sessionID)
+      const generation = store.beginPredict(sessionID, turnKey)
       if (generation === null) {
         debug("skip", "store busy")
         return
       }
-      inFlightTurnKey = turnKey
-      const model = resolution.model
-      const selectedModel = model ? { providerID: model.providerID, id: model.id } : undefined
+
       try {
-        debug("predicting", {
+        debug("predicting", { sessionID, model: selected, source: resolution.model?.source, agent })
+        const result = await predictor.predict({
           sessionID,
-          model: selectedModel,
-          variant: model?.variant,
-          source: model?.source,
+          prompt: buildPrompt(conversation),
+          ...(agent ? { agent } : {}),
+          ...(selected ? { model: selected } : {}),
         })
-        const result = await predictor.predict(sessionID, selectedModel, buildPrompt(conversation), model?.variant)
-        if (inFlightTurnKey !== turnKey) return
         debug("predict result", { ok: result.ok, length: result.ok ? (result.text?.length ?? 0) : -1 })
-        if (result.ok) {
-          completedTurnKey = turnKey
-          store.commit(generation, sessionID, result.text)
-        } else {
-          store.discard()
-          scheduleRetry(turnKey)
-        }
+        store.settle(generation, turnKey, result.ok ? result.text : null)
       } catch (error) {
         debug("prediction failed", errorMessage(error))
-        if (inFlightTurnKey !== turnKey) return
-        store.discard()
-        scheduleRetry(turnKey)
-      } finally {
-        if (inFlightTurnKey === turnKey) inFlightTurnKey = undefined
+        store.settle(generation, turnKey, null)
       }
     }
 
@@ -212,16 +189,11 @@ const opencodeNextPrompt = Plugin.define({
       const editor = focusedPrompt()
       if (!editor) return
       // Same insertion path the host uses for the `tui.prompt.append` event.
+      // The suggestion stays ready: deleting the text reveals it again.
       editor.insertText(current.text)
       setTimeout(() => {
         if (disposed || editor.isDestroyed) return
-        // OpenTUI 0.6+ removed getLayoutNode() in favor of invalidateIntrinsicSize();
-        // fall back to getLayoutNode().markDirty() for OpenCode 2.0.x (OpenTUI 0.5).
-        if (typeof editor.invalidateIntrinsicSize === "function") {
-          editor.invalidateIntrinsicSize()
-        } else {
-          editor.getLayoutNode?.().markDirty()
-        }
+        editor.invalidateIntrinsicSize()
         editor.gotoBufferEnd()
         context.renderer.requestRender()
       }, 0)
@@ -235,7 +207,7 @@ const opencodeNextPrompt = Plugin.define({
       // never intercept the right arrow in dialogs, editors, or shell mode.
       target: () => {
         const editor = focusedPrompt()
-        if (!editor || isShellMode(context, editor)) return null
+        if (!editor || isShellMode(context)) return null
         return editor as unknown as Renderable
       },
       commands: [
@@ -248,7 +220,7 @@ const opencodeNextPrompt = Plugin.define({
           run: () => {
             debug("accept key", { kind: store.read().kind, empty: promptInputIsEmpty() })
             if (promptInputIsEmpty()) accept()
-            // Keep the default key behavior (cursor movement), like V1's fallthrough.
+            // Fall through so the key keeps its default cursor behavior.
             return false
           },
         },
@@ -281,14 +253,10 @@ const opencodeNextPrompt = Plugin.define({
     const watchIdle = (type: IdleEventType): void => {
       unsubscribers.push(
         context.data.on(type, (event) => {
-          // OpenCode 2.0.x's `session.idle` event carries no session id; it is
-          // safe to treat it as the focused session. Newer hosts include it.
-          const eventSessionID = (event as { data?: { sessionID?: string } }).data?.sessionID
           const current = syncActiveSession()
-          if (eventSessionID !== undefined && eventSessionID !== current) return
-          if (!current) return
+          if (!current || event.data.sessionID !== current) return
           debug(type)
-          if (store.read().kind === "idle") requestPrediction()
+          requestPrediction()
         }),
       )
     }
@@ -299,7 +267,7 @@ const opencodeNextPrompt = Plugin.define({
         const type = event.data.status.type
         debug("session.status event", { type })
         if (type === "busy") invalidate()
-        else if (type === "idle" && store.read().kind === "idle") requestPrediction()
+        else if (type === "idle") requestPrediction()
       }),
     )
 
@@ -333,7 +301,7 @@ const opencodeNextPrompt = Plugin.define({
     unsubscribers.push(
       context.data.on("session.revert.cleared", (event) => {
         if (event.data.sessionID !== syncActiveSession()) return
-        if (store.read().kind === "idle") requestPrediction()
+        requestPrediction()
       }),
     )
 
@@ -359,7 +327,6 @@ const opencodeNextPrompt = Plugin.define({
 
     return () => {
       disposed = true
-      clearRetry()
       for (const off of unsubscribers) off()
       placeholder.dispose()
       disposeSlot()
@@ -368,17 +335,5 @@ const opencodeNextPrompt = Plugin.define({
     }
   },
 })
-
-function versionAtLeast(version: string, minimum: readonly [number, number, number]): boolean {
-  const match = version.match(/(\d+)\.(\d+)\.(\d+)/)
-  if (!match) return true
-  const current = [Number(match[1]), Number(match[2]), Number(match[3])]
-  for (let index = 0; index < minimum.length; index += 1) {
-    const left = current[index] ?? 0
-    const right = minimum[index] ?? 0
-    if (left !== right) return left > right
-  }
-  return true
-}
 
 export default opencodeNextPrompt

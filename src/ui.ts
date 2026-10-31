@@ -1,6 +1,6 @@
 import type { Context } from "@opencode/plugin/tui/context"
 import type { SuggestionStore } from "./state.ts"
-import { asPromptTextarea, type TextareaLike } from "./editor.ts"
+import { asPromptTextarea } from "./editor.ts"
 import { debug } from "./debug.ts"
 
 const ARROW_KEYS: Record<string, string> = {
@@ -10,16 +10,9 @@ const ARROW_KEYS: Record<string, string> = {
   down: "↓",
 }
 
-// Fallback for hosts that do not expose a shell mode through the keymap; the
-// keymap mode is authoritative when available.
-const SHELL_PLACEHOLDER_PREFIX = "Run a command"
-
-export function isShellPlaceholder(placeholder: unknown): boolean {
-  return typeof placeholder === "string" && placeholder.startsWith(SHELL_PLACEHOLDER_PREFIX)
-}
-
-export function isShellMode(context: Context, editor: TextareaLike): boolean {
-  return context.keymap.mode?.current?.() === "shell" || isShellPlaceholder(editor.placeholder)
+/** Shell mode edits a command, not a message, so the suggestion stays hidden. */
+export function isShellMode(context: Context): boolean {
+  return context.keymap.mode.current() === "shell"
 }
 
 function displayKey(key: string): string {
@@ -63,7 +56,7 @@ export function createPlaceholderController(
       editor: editor !== null,
     })
     if (!editor) return
-    if (isShellMode(context, editor)) return
+    if (isShellMode(context)) return
 
     if (current.kind === "ready" && current.sessionID === sessionID()) {
       if (!isOurs(editor.placeholder)) {

@@ -19,7 +19,7 @@ export type ModelResolution = {
   warning?: string
 }
 
-export const NEXT_PROMPT_AGENT_IDS = ["next-prompt", "next_prompt"] as const
+export const NEXT_PROMPT_AGENT_IDS: readonly string[] = ["next-prompt", "next_prompt"]
 
 const TITLE_AGENT_IDS = ["title"] as const
 

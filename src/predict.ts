@@ -9,167 +9,116 @@ export type PredictOptions = {
 
 export type PredictResult = { ok: true; text: string | null } | { ok: false }
 
+export type PredictRequest = {
+  sessionID: string
+  prompt: string
+  /** Agent that supplies the prediction persona, when one is configured. */
+  agent?: string
+  model?: { providerID: string; id: string; variant?: string }
+}
+
+export type Predictor = {
+  predict(request: PredictRequest): Promise<PredictResult>
+  dispose(): Promise<void>
+}
+
 const TITLE = "next-prompt-suggestion"
 const DENY_ALL_TOOLS = [{ action: "*", resource: "*", effect: "deny" as const }]
 const CLEANUP_TIMEOUT_MS = 5_000
 
-export type Predictor = {
-  predict(
-    sessionID: string,
-    model: { providerID: string; id: string } | undefined,
-    prompt: string,
-    variant?: string,
-  ): Promise<PredictResult>
-  dispose(): Promise<void>
-}
-
 /**
- * Prediction runs in a lightweight, tool-denied child helper session:
- * - `parentID` inherits the active session's exact `Location`, so project-scoped
- *   providers and models resolve (including workspaces).
+ * One prediction is one call, in a disposable helper session:
+ *
+ * - `parentID` inherits the active session's exact location, so project-scoped
+ *   providers and models resolve; the explicit model is passed for the
+ *   configured override.
  * - `permissions` deny every tool, stripping MCP tools, skills, and their
  *   instructions from the request context.
- * - `session.generate` writes no messages and emits no execution events.
+ * - `session.generate` writes no messages, emits no execution events, and does
+ *   not touch the main conversation.
+ * - A configured `next-prompt` agent supplies the prediction persona instead of
+ *   the coding agent's inherited prompt.
  *
- * The helper is removed in the background. When the helper path fails (an older
- * host, a transient create error), predictions fall back to `session.generate`
- * on the active session and finally to the global `generate.text`; the timeout
- * budget is shared across attempts.
+ * The helper is removed after the call, including when the request times out
+ * and the create resolves late. There is no second attempt: a suggestion that
+ * misses the decision point is worthless.
  */
 export function createPredictor(client: OpenCodeClient, options: PredictOptions): Predictor {
-  let activeHelperCleanup: (() => Promise<void>) | undefined
   let activeAbort: AbortController | undefined
   let runID = 0
 
-  const removeHelperSession = async (id: string): Promise<void> => {
-    if (typeof client.session?.remove !== "function") return
-    const controller = new AbortController()
-    const timer = setTimeout(() => controller.abort(), CLEANUP_TIMEOUT_MS)
+  const removeHelper = async (sessionID: string): Promise<void> => {
     try {
-      await client.session.remove({ sessionID: id }, { signal: controller.signal })
+      await client.session.remove({ sessionID }, { signal: AbortSignal.timeout(CLEANUP_TIMEOUT_MS) })
     } catch (error) {
-      debug("helper session cleanup failed", { sessionID: id, error: errorMessage(error) })
-    } finally {
-      clearTimeout(timer)
+      debug("helper cleanup failed", { sessionID, error: errorMessage(error) })
     }
   }
 
   return {
-    async predict(sessionID, model, prompt, variant) {
+    async predict({ sessionID, prompt, agent, model }) {
       const run = ++runID
-      const spec = model ? { providerID: model.providerID, id: model.id, ...(variant ? { variant } : {}) } : undefined
-      const deadline = Date.now() + options.timeoutMs
+      const controller = new AbortController()
+      activeAbort = controller
+      let helperID: string | undefined
+      let helperRemoved = false
+      let timer: ReturnType<typeof setTimeout> | undefined
 
-      const stale = (): boolean => run !== runID
-
-      /**
-       * Race the client call against a real deadline. Aborting the signal is
-       * best effort (a transport may ignore it); the race guarantees the UI
-       * is never stuck in "predicting" when only the abort is ignored.
-       */
-      const runWithTimeout = async (
-        call: (signal: AbortSignal) => Promise<{ text: string }>,
-      ): Promise<PredictResult> => {
-        const remaining = deadline - Date.now()
-        if (remaining <= 0) return { ok: false }
-        const controller = new AbortController()
-        activeAbort = controller
-        let timer: ReturnType<typeof setTimeout> | undefined
-        const timeout = new Promise<PredictResult>((resolve) => {
-          timer = setTimeout(() => {
-            controller.abort()
-            debug("prediction timed out", { remaining })
-            resolve({ ok: false })
-          }, remaining)
-        })
-        try {
-          return await Promise.race([
-            call(controller.signal).then((result) => ({ ok: true as const, text: parsePrediction(result.text) })),
-            timeout,
-          ])
-        } finally {
-          if (timer !== undefined) clearTimeout(timer)
-          if (activeAbort === controller) activeAbort = undefined
-        }
+      const cleanupHelper = (id: string): void => {
+        if (helperRemoved) return
+        helperRemoved = true
+        void removeHelper(id)
       }
 
-      const hasSessionCreate = typeof client.session?.create === "function"
-      const hasSessionGenerate = typeof client.session?.generate === "function"
-      const hasGenerateText = typeof client.generate?.text === "function"
+      type Outcome = { kind: "text"; text: string } | { kind: "timeout"; result: PredictResult }
 
-      if (hasSessionCreate && hasSessionGenerate) {
-        let cleanup: (() => void) | undefined
-        try {
-          const result = await runWithTimeout(async (signal) => {
-            const created = await client.session.create(
-              {
-                parentID: sessionID,
-                title: TITLE,
-                ...(spec ? { model: spec } : {}),
-                permissions: DENY_ALL_TOOLS,
-              },
-              { signal },
-            )
-            let cleaned: Promise<void> | undefined
-            const close = () => {
-              if (!cleaned) cleaned = removeHelperSession(created.id)
-              return cleaned
-            }
-            cleanup = () => {
-              void close()
-            }
-            activeHelperCleanup = close
-            if (signal.aborted) {
-              void close()
-              throw new Error("prediction aborted before generate")
-            }
-            return client.session.generate({ sessionID: created.id, prompt }, { signal })
-          })
-          if (stale()) return { ok: false }
-          return result
-        } catch (error) {
-          debug("helper session failed", errorMessage(error))
-          if (stale()) return { ok: false }
-        } finally {
-          cleanup?.()
+      const timeout = new Promise<Outcome>((resolve) => {
+        timer = setTimeout(() => {
+          controller.abort()
+          debug("prediction timed out")
+          resolve({ kind: "timeout", result: { ok: false } })
+        }, options.timeoutMs)
+      })
+
+      const generate = (async () => {
+        const created = await client.session.create(
+          {
+            parentID: sessionID,
+            title: TITLE,
+            ...(agent ? { agent } : {}),
+            ...(model ? { model } : {}),
+            permissions: DENY_ALL_TOOLS,
+          },
+          { signal: controller.signal },
+        )
+        helperID = created.id
+        if (controller.signal.aborted) {
+          cleanupHelper(created.id)
+          throw new Error("prediction aborted before generate")
         }
-      }
+        return client.session.generate({ sessionID: created.id, prompt }, { signal: controller.signal })
+      })().then((result): Outcome => ({ kind: "text", text: result.text }))
 
-      if (hasSessionGenerate) {
-        try {
-          const result = await runWithTimeout((signal) => client.session.generate({ sessionID, prompt }, { signal }))
-          if (stale()) return { ok: false }
-          return result
-        } catch (error) {
-          debug("session.generate failed", errorMessage(error))
-          if (stale()) return { ok: false }
-        }
+      try {
+        const outcome = await Promise.race<Outcome>([generate, timeout])
+        if (outcome.kind === "timeout") return outcome.result
+        if (run !== runID) return { ok: false }
+        return { ok: true, text: parsePrediction(outcome.text) }
+      } catch (error) {
+        if (run !== runID) return { ok: false }
+        debug("prediction failed", errorMessage(error))
+        return { ok: false }
+      } finally {
+        if (timer !== undefined) clearTimeout(timer)
+        if (activeAbort === controller) activeAbort = undefined
+        if (helperID) cleanupHelper(helperID)
       }
-
-      if (hasGenerateText) {
-        try {
-          const result = await runWithTimeout((signal) =>
-            client.generate.text({ prompt, ...(spec ? { model: spec } : {}) }, { signal }),
-          )
-          if (stale()) return { ok: false }
-          return result
-        } catch (error) {
-          debug("generate.text failed", errorMessage(error))
-          if (stale()) return { ok: false }
-        }
-      }
-
-      debug("no generation endpoint available on client")
-      return { ok: false }
     },
 
     async dispose() {
       runID += 1
       activeAbort?.abort()
       activeAbort = undefined
-      const cleanup = activeHelperCleanup
-      activeHelperCleanup = undefined
-      if (cleanup) await cleanup()
     },
   }
 }

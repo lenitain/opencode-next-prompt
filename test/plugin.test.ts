@@ -17,6 +17,16 @@ async function waitFor(predicate: () => boolean, timeoutMs = 1_500): Promise<voi
   }
 }
 
+function deferred<T>() {
+  let resolve!: (value: T) => void
+  let reject!: (error: unknown) => void
+  const promise = new Promise<T>((res, rej) => {
+    resolve = res
+    reject = rej
+  })
+  return { promise, resolve, reject }
+}
+
 const DEBUG_LOG = join(tmpdir(), `opencode-next-prompt-test-${process.pid}.log`)
 rmSync(DEBUG_LOG, { force: true })
 setDebugLogFile(DEBUG_LOG)
@@ -33,6 +43,7 @@ afterAll(() => {
 
 const SESSION_ID = "ses_test"
 const SUGGESTION = "跑一下测试确认修复"
+const MARKER = ` [→] ${SUGGESTION}`
 
 /**
  * A structural TextareaRenderable lookalike. Deliberately NOT built on
@@ -75,7 +86,6 @@ function createFixture(options: Record<string, unknown> = {}) {
   const sessionCreateCalls: any[] = []
   const sessionRemoveCalls: any[] = []
   const sessionGenerateCalls: any[] = []
-  const generateTextCalls: any[] = []
   const layers: Array<() => any> = []
   const editor = makeTextarea()
   let focused: any = editor
@@ -84,8 +94,10 @@ function createFixture(options: Record<string, unknown> = {}) {
   let sessionStatus = "idle"
   let mode = "base"
   let agents: any[] = []
-
-  const messages: any[] = [
+  let permissions: any[] = []
+  let forms: any[] = []
+  let queued: any[] = []
+  let messages: any[] = [
     { id: "msg_u1", type: "user", text: "修复登录问题" },
     {
       id: "msg_a1",
@@ -93,6 +105,7 @@ function createFixture(options: Record<string, unknown> = {}) {
       content: [{ type: "text", text: "已经修好了，原因是时区判断写反了。" }],
     },
   ]
+  let generate: (input: any) => Promise<{ text: string }> = async () => ({ text: SUGGESTION })
 
   const context = {
     options,
@@ -125,13 +138,7 @@ function createFixture(options: Record<string, unknown> = {}) {
         },
         generate: async (input: any) => {
           sessionGenerateCalls.push(input)
-          return { text: SUGGESTION }
-        },
-      },
-      generate: {
-        text: async (input: any) => {
-          generateTextCalls.push(input)
-          return { text: SUGGESTION }
+          return generate(input)
         },
       },
     },
@@ -161,6 +168,9 @@ function createFixture(options: Record<string, unknown> = {}) {
           location: { directory: "/tmp/e2e" },
           model: { providerID: "acme", id: "fast", variant: "high" },
         }),
+        permission: { list: () => permissions },
+        form: { list: () => forms },
+        pending: { list: () => queued },
       },
       location: {
         agent: {
@@ -206,15 +216,28 @@ function createFixture(options: Record<string, unknown> = {}) {
     context,
     editor,
     toasts,
-    generateCalls: sessionGenerateCalls,
     sessionCreateCalls,
     sessionRemoveCalls,
     sessionGenerateCalls,
-    generateTextCalls,
     layers,
     subscribed,
     set agents(value: any[]) {
       agents = value
+    },
+    set permissions(value: any[]) {
+      permissions = value
+    },
+    set forms(value: any[]) {
+      forms = value
+    },
+    set queued(value: any[]) {
+      queued = value
+    },
+    set messages(value: any[]) {
+      messages = value
+    },
+    set generate(value: (input: any) => Promise<{ text: string }>) {
+      generate = value
     },
     get slotClaim() {
       return slotClaim
@@ -263,7 +286,7 @@ function acceptCommand(fixture: ReturnType<typeof createFixture>) {
 const idleEvent = { sessionID: SESSION_ID, status: { type: "idle" } }
 const busyEvent = { sessionID: SESSION_ID, status: { type: "busy" } }
 
-test("idle triggers prediction, placeholder shows, accept key fills, busy clears", async () => {
+test("idle triggers one prediction in a helper session, shows the placeholder, and accepts", async () => {
   const fixture = createFixture()
   const cleanup = await plugin.setup(fixture.context)
 
@@ -275,7 +298,7 @@ test("idle triggers prediction, placeholder shows, accept key fills, busy clears
   await sleep(10)
   expect(fixture.editor.placeholder).toBeUndefined()
 
-  // assistant finished → session idle → prediction runs
+  // assistant finished → session idle → prediction runs exactly once
   fixture.fire("session.status", busyEvent)
   fixture.fire("session.status", idleEvent)
   await waitFor(() => fixture.sessionCreateCalls.length === 1)
@@ -287,15 +310,14 @@ test("idle triggers prediction, placeholder shows, accept key fills, busy clears
     permissions: [{ action: "*", resource: "*", effect: "deny" }],
   })
   expect(fixture.sessionGenerateCalls.length).toBe(1)
-  expect(fixture.generateTextCalls.length).toBe(0)
   const call = fixture.sessionGenerateCalls[0]
   expect(call.sessionID).toBe("ses_helper")
-  // tool-suppression instruction + delimited conversation context in the prompt
-  expect(call.prompt).toContain("NO_SUGGESTION")
   expect(call.prompt).toContain('<turn role="user">修复登录问题</turn>')
   expect(call.prompt).toContain('<turn role="assistant" latest="true">已经修好了，原因是时区判断写反了。</turn>')
+  expect(call.prompt).toContain("NO_SUGGESTION")
+
   // suggestion lands in the placeholder with the accept-key marker
-  await waitFor(() => fixture.editor.placeholder === ` [→] ${SUGGESTION}`)
+  await waitFor(() => fixture.editor.placeholder === MARKER)
   await waitFor(() => fixture.sessionRemoveCalls.length === 1)
 
   // keymap layer: command registered with the V2 shape
@@ -314,6 +336,17 @@ test("idle triggers prediction, placeholder shows, accept key fills, busy clears
   expect(command.run()).toBe(false)
   expect(fixture.editor.inserted).toEqual([SUGGESTION])
 
+  // accepting fills the input; the suggestion stays ready for this turn, so
+  // deleting the text reveals it again
+  expect(command.enabled()).toBe(true)
+  expect(fixture.editor.placeholder).toBe(MARKER)
+  fixture.editor.plainText = ""
+  expect(fixture.editor.placeholder).toBe(MARKER)
+  fixture.fire("session.status", idleEvent)
+  await sleep(30)
+  expect(fixture.sessionCreateCalls.length).toBe(1)
+  expect(fixture.editor.placeholder).toBe(MARKER)
+
   // non-empty input → → keeps cursor behavior, no insertion
   fixture.editor.inserted.length = 0
   fixture.editor.plainText = "x"
@@ -331,6 +364,115 @@ test("idle triggers prediction, placeholder shows, accept key fills, busy clears
   for (const handlers of fixture.subscribed.values()) expect(handlers.length).toBe(0)
 })
 
+test("a draft does not block prediction; clearing reveals the suggestion", async () => {
+  const fixture = createFixture()
+  const cleanup = await plugin.setup(fixture.context)
+  fixture.renderSlot()
+
+  fixture.editor.plainText = "半句话"
+  fixture.fire("session.status", idleEvent)
+  await waitFor(() => fixture.sessionCreateCalls.length === 1)
+  await waitFor(() => fixture.editor.placeholder === MARKER)
+
+  fixture.editor.plainText = ""
+  expect(fixture.editor.placeholder).toBe(MARKER)
+
+  if (typeof cleanup === "function") await cleanup()
+})
+
+test("dialogs and queued messages block the call", async () => {
+  const fixture = createFixture()
+  const cleanup = await plugin.setup(fixture.context)
+  fixture.renderSlot()
+
+  fixture.permissions = [{ id: "perm_1" }]
+  fixture.fire("session.status", idleEvent)
+  await sleep(20)
+  expect(fixture.sessionCreateCalls.length).toBe(0)
+
+  fixture.permissions = []
+  fixture.forms = [{ id: "form_1" }]
+  fixture.fire("session.status", idleEvent)
+  await sleep(20)
+  expect(fixture.sessionCreateCalls.length).toBe(0)
+
+  fixture.forms = []
+  fixture.queued = [{ id: "msg_1" }]
+  fixture.fire("session.status", idleEvent)
+  await sleep(20)
+  expect(fixture.sessionCreateCalls.length).toBe(0)
+
+  fixture.queued = []
+  fixture.fire("session.status", idleEvent)
+  await waitFor(() => fixture.sessionCreateCalls.length === 1)
+
+  if (typeof cleanup === "function") await cleanup()
+})
+
+test("shell mode does not block prediction; leaving it reveals the suggestion", async () => {
+  const fixture = createFixture()
+  const cleanup = await plugin.setup(fixture.context)
+  fixture.renderSlot()
+
+  fixture.mode = "shell"
+  fixture.fire("session.status", idleEvent)
+  await waitFor(() => fixture.sessionCreateCalls.length === 1)
+  await sleep(20)
+  expect(fixture.editor.placeholder).toBeUndefined()
+
+  fixture.mode = "base"
+  fixture.fireRenderer("frame")
+  expect(fixture.editor.placeholder).toBe(MARKER)
+
+  if (typeof cleanup === "function") await cleanup()
+})
+
+test("typing while a prediction is in flight keeps the result for when the input is cleared", async () => {
+  const fixture = createFixture()
+  const pending = deferred<{ text: string }>()
+  fixture.generate = () => pending.promise
+  const cleanup = await plugin.setup(fixture.context)
+  fixture.renderSlot()
+
+  fixture.fire("session.status", idleEvent)
+  await waitFor(() => fixture.sessionGenerateCalls.length === 1)
+
+  fixture.editor.plainText = "typing"
+  pending.resolve({ text: SUGGESTION })
+  await waitFor(() => fixture.editor.placeholder === MARKER)
+  expect(acceptCommand(fixture).enabled()).toBe(true)
+
+  fixture.editor.plainText = ""
+  expect(fixture.editor.placeholder).toBe(MARKER)
+  await waitFor(() => fixture.sessionRemoveCalls.length === 1)
+
+  if (typeof cleanup === "function") await cleanup()
+})
+
+test("a failed prediction is not retried", async () => {
+  const fixture = createFixture()
+  fixture.generate = async () => {
+    throw new Error("transient")
+  }
+  const cleanup = await plugin.setup(fixture.context)
+  fixture.renderSlot()
+
+  fixture.fire("session.status", idleEvent)
+  await waitFor(() => fixture.sessionGenerateCalls.length === 1)
+  await sleep(900)
+
+  expect(fixture.sessionGenerateCalls.length).toBe(1)
+  expect(fixture.sessionCreateCalls.length).toBe(1)
+  expect(fixture.editor.placeholder).toBeUndefined()
+
+  // the failed turn is settled; a repeated idle event does not call again
+  fixture.fire("session.status", idleEvent)
+  await sleep(30)
+  expect(fixture.sessionCreateCalls.length).toBe(1)
+
+  if (typeof cleanup === "function") await cleanup()
+})
+
 test("unknown configured model → one error toast, no prediction call", async () => {
   const fixture = createFixture({ model: "acme/missing" })
   const cleanup = await plugin.setup(fixture.context)
@@ -341,7 +483,7 @@ test("unknown configured model → one error toast, no prediction call", async (
   fixture.fire("session.status", idleEvent)
   await sleep(30)
 
-  expect(fixture.generateCalls.length).toBe(0)
+  expect(fixture.sessionCreateCalls.length).toBe(0)
   expect(fixture.toasts.length).toBe(1)
   expect(fixture.toasts[0].message).toContain(
     'model "missing" not found on provider "acme" (available models: fast, lite)',
@@ -365,12 +507,12 @@ test("uses agents.title.model from opencode.jsonc with the lowest variant", asyn
     id: "lite",
     variant: "minimal",
   })
-  await waitFor(() => fixture.editor.placeholder === ` [→] ${SUGGESTION}`)
+  await waitFor(() => fixture.editor.placeholder === MARKER)
 
   if (typeof cleanup === "function") await cleanup()
 })
 
-test("prefers agents['next-prompt'].model over agents.title.model", async () => {
+test("a configured next-prompt agent supplies the model and the prediction persona", async () => {
   const fixture = createFixture()
   fixture.agents = [
     { id: "title", model: { providerID: "acme", id: "lite" } },
@@ -382,10 +524,9 @@ test("prefers agents['next-prompt'].model over agents.title.model", async () => 
   fixture.fire("session.status", idleEvent)
   await waitFor(() => fixture.sessionCreateCalls.length === 1)
 
-  expect(fixture.sessionCreateCalls[0].model).toEqual({
-    providerID: "acme",
-    id: "fast",
-    variant: "low",
+  expect(fixture.sessionCreateCalls[0]).toMatchObject({
+    agent: "next-prompt",
+    model: { providerID: "acme", id: "fast", variant: "low" },
   })
 
   if (typeof cleanup === "function") await cleanup()
@@ -414,11 +555,11 @@ test("revert of the current session invalidates the suggestion; other sessions d
   fixture.renderSlot()
 
   fixture.fire("session.status", idleEvent)
-  await waitFor(() => fixture.editor.placeholder === ` [→] ${SUGGESTION}`)
+  await waitFor(() => fixture.editor.placeholder === MARKER)
 
   // another session's revert must not touch our state
   fixture.fire("session.revert.committed", { sessionID: "ses_other", to: "msg_u1" })
-  expect(fixture.editor.placeholder).toBe(` [→] ${SUGGESTION}`)
+  expect(fixture.editor.placeholder).toBe(MARKER)
 
   // our session's revert invalidates and clears the placeholder
   fixture.fire("session.revert.committed", { sessionID: SESSION_ID, to: "msg_u1" })
@@ -428,76 +569,30 @@ test("revert of the current session invalidates the suggestion; other sessions d
   if (typeof cleanup === "function") await cleanup()
 })
 
-test("when session.create is unavailable, falls back to session.generate on the active session", async () => {
-  const fixture = createFixture({ model: "acme/fast" })
-  delete (fixture.context.client.session as any).create
-  const response = { text: SUGGESTION }
-  ;(fixture.context.client.session as any).generate = async (input: any) => {
-    fixture.sessionGenerateCalls.push(input)
-    return response
-  }
-  const cleanup = await plugin.setup(fixture.context)
-  fixture.renderSlot()
-
-  fixture.fire("session.status", idleEvent)
-  await waitFor(() => fixture.sessionGenerateCalls.length === 1)
-
-  expect(fixture.generateTextCalls.length).toBe(0)
-  expect(fixture.sessionGenerateCalls[0].sessionID).toBe(SESSION_ID)
-  await waitFor(() => fixture.editor.placeholder === ` [→] ${SUGGESTION}`)
-
-  if (typeof cleanup === "function") await cleanup()
-})
-
-test("when the session endpoints are unavailable, falls back to generate.text with the configured model", async () => {
-  const fixture = createFixture({ model: "acme/fast" })
-  delete (fixture.context.client.session as any).create
-  delete (fixture.context.client.session as any).generate
-  ;(fixture.context.client.generate as any).text = async (input: any) => {
-    fixture.generateTextCalls.push(input)
-    return { text: SUGGESTION }
-  }
-  const cleanup = await plugin.setup(fixture.context)
-  fixture.renderSlot()
-
-  fixture.fire("session.status", idleEvent)
-  await waitFor(() => fixture.generateTextCalls.length === 1)
-
-  expect(fixture.generateTextCalls[0].model).toEqual({ providerID: "acme", id: "fast", variant: "low" })
-  await waitFor(() => fixture.editor.placeholder === ` [→] ${SUGGESTION}`)
-
-  if (typeof cleanup === "function") await cleanup()
-})
-
-test("shell mode placeholder is not overwritten and accept key does not insert into shell mode", async () => {
+test("shell mode keeps the command placeholder and restores the suggestion after leaving shell", async () => {
   const fixture = createFixture()
   const cleanup = await plugin.setup(fixture.context)
   fixture.renderSlot()
 
   fixture.fire("session.status", idleEvent)
-  await waitFor(() => fixture.editor.placeholder === ` [→] ${SUGGESTION}`)
+  await waitFor(() => fixture.editor.placeholder === MARKER)
 
-  // User presses `!` to enter shell mode; TUI sets shell placeholder
+  // User presses `!` to enter shell mode; the prompt edits a command now
+  fixture.mode = "shell"
   fixture.editor.placeholder = 'Run a command… "git status"'
   fixture.fireRenderer("frame")
   expect(fixture.editor.placeholder).toBe('Run a command… "git status"')
+  expect(acceptCommand(fixture).enabled()).toBe(true)
 
   const command = acceptCommand(fixture)
   expect(command.run()).toBe(false)
   expect(fixture.editor.inserted).toEqual([])
 
-  // Leaving shell mode restores suggestion on next frame
+  // leaving shell mode restores the suggestion on the next frame
+  fixture.mode = "base"
   fixture.editor.placeholder = null
   fixture.fireRenderer("frame")
-  expect(fixture.editor.placeholder).toBe(` [→] ${SUGGESTION}`)
-
-  // Even without the host placeholder, the keymap mode is authoritative.
-  fixture.mode = "shell"
-  fixture.editor.placeholder = null
-  fixture.editor.plainText = ""
-  expect(command.run()).toBe(false)
-  expect(fixture.editor.inserted).toEqual([])
-  fixture.mode = "base"
+  expect(fixture.editor.placeholder).toBe(MARKER)
 
   if (typeof cleanup === "function") await cleanup()
 })
@@ -508,13 +603,13 @@ test("TUI's own placeholder overwrite is restored on the next frame", async () =
   fixture.renderSlot()
 
   fixture.fire("session.status", idleEvent)
-  await waitFor(() => fixture.editor.placeholder === ` [→] ${SUGGESTION}`)
+  await waitFor(() => fixture.editor.placeholder === MARKER)
 
   // The TUI's placeholder memo overwrites ours (session switch / resize /
   // shell change) — the next frame must restore the marker.
   fixture.editor.placeholder = "Ask anything…"
   fixture.fireRenderer("frame")
-  expect(fixture.editor.placeholder).toBe(` [→] ${SUGGESTION}`)
+  expect(fixture.editor.placeholder).toBe(MARKER)
 
   // Once idle, the host's own placeholder is restored, and frames leave it alone.
   fixture.fire("session.status", busyEvent)
@@ -526,73 +621,43 @@ test("TUI's own placeholder overwrite is restored on the next frame", async () =
   if (typeof cleanup === "function") await cleanup()
 })
 
-test("single-line input focused → hidden and un-accepted; refocus restores the placeholder", async () => {
+test("focus moving to a dialog preserves the suggestion; refocusing shows it", async () => {
   const fixture = createFixture()
   const cleanup = await plugin.setup(fixture.context)
   fixture.renderSlot()
 
   fixture.fire("session.status", idleEvent)
-  await waitFor(() => fixture.editor.placeholder === ` [→] ${SUGGESTION}`)
-
-  const command = acceptCommand(fixture)
+  await waitFor(() => fixture.editor.placeholder === MARKER)
 
   // focus moves to a single-line Input (dialog/form field): never receive it
   const input = makeSingleLineInput()
   fixture.focused = input
   fixture.fireRenderer("focused_editor", input, fixture.editor)
-  expect(input.placeholder).toBeNull()
-  expect(command.run()).toBe(false)
-  expect(input.inserted).toEqual([])
+  fixture.fireRenderer("frame")
 
-  // focus returns to the prompt textarea → our placeholder comes back
+  expect(input.placeholder).toBeNull()
+  expect(acceptCommand(fixture).enabled()).toBe(true)
+
+  // focus returns to the prompt textarea → the suggestion is still there
   fixture.focused = fixture.editor
   fixture.fireRenderer("focused_editor", fixture.editor, input)
-  expect(fixture.editor.placeholder).toBe(` [→] ${SUGGESTION}`)
+  expect(fixture.editor.placeholder).toBe(MARKER)
 
   if (typeof cleanup === "function") await cleanup()
-  // dispose restores the host placeholder captured before the suggestion
-  expect(fixture.editor.placeholder).toBeNull()
 })
 
-test("accept supports both OpenTUI 0.6 invalidateIntrinsicSize and OpenTUI 0.5 getLayoutNode", async () => {
+test("accept inserts the text and invalidates the editor size", async () => {
   const fixture = createFixture()
   const cleanup = await plugin.setup(fixture.context)
   fixture.renderSlot()
 
   fixture.fire("session.status", idleEvent)
-  await waitFor(() => fixture.editor.placeholder === ` [→] ${SUGGESTION}`)
+  await waitFor(() => fixture.editor.placeholder === MARKER)
   const command = acceptCommand(fixture)
 
-  // OpenTUI 0.6+ path: calls invalidateIntrinsicSize()
   expect(command.run()).toBe(false)
   await sleep(10)
   expect(fixture.editor.invalidatedCount).toBe(1)
-
-  // OpenTUI 0.5 fallback path: calls getLayoutNode().markDirty() when invalidateIntrinsicSize is absent
-  let markedDirty = 0
-  const legacyEditor: Record<string, any> = {
-    plainText: "",
-    placeholder: undefined,
-    isDestroyed: false,
-    inserted: [] as string[],
-    insertText(value: string) {
-      legacyEditor.inserted.push(value)
-      legacyEditor.plainText += value
-    },
-    getLayoutNode: () => ({
-      markDirty() {
-        markedDirty += 1
-      },
-    }),
-    gotoBufferEnd() {},
-  }
-  fixture.focused = legacyEditor
-  fixture.fireRenderer("focused_editor", legacyEditor, fixture.editor)
-  expect(legacyEditor.placeholder).toBe(` [→] ${SUGGESTION}`)
-  expect(command.run()).toBe(false)
-  await sleep(10)
-  expect(legacyEditor.inserted).toEqual([SUGGESTION])
-  expect(markedDirty).toBe(1)
 
   if (typeof cleanup === "function") await cleanup()
 })
@@ -603,7 +668,7 @@ test("regenerating a reply produces a fresh prediction", async () => {
   fixture.renderSlot()
 
   fixture.fire("session.status", idleEvent)
-  await waitFor(() => fixture.editor.placeholder === ` [→] ${SUGGESTION}`)
+  await waitFor(() => fixture.editor.placeholder === MARKER)
   const before = fixture.sessionCreateCalls.length
 
   // A regenerated reply emits started → succeeded for the same user message.
@@ -612,34 +677,7 @@ test("regenerating a reply produces a fresh prediction", async () => {
   fixture.fire("session.execution.succeeded", { sessionID: SESSION_ID })
 
   await waitFor(() => fixture.sessionCreateCalls.length === before + 1)
-  await waitFor(() => fixture.editor.placeholder === ` [→] ${SUGGESTION}`)
-
-  if (typeof cleanup === "function") await cleanup()
-})
-
-test("a pending retry is cancelled by a revert and does not resurrect the suggestion", async () => {
-  const fixture = createFixture()
-  const failing = async (input: any) => {
-    fixture.sessionGenerateCalls.push(input)
-    throw new Error("transient")
-  }
-  ;(fixture.context.client.session as any).generate = failing
-  ;(fixture.context.client.generate as any).text = async () => {
-    throw new Error("transient")
-  }
-  const cleanup = await plugin.setup(fixture.context)
-  fixture.renderSlot()
-
-  fixture.fire("session.status", idleEvent)
-  await waitFor(() => fixture.sessionCreateCalls.length === 1)
-  await waitFor(() => fixture.sessionGenerateCalls.length >= 2)
-  expect(fixture.editor.placeholder).toBeUndefined()
-
-  fixture.fire("session.revert.committed", { sessionID: SESSION_ID, to: "msg_u1" })
-  await sleep(900)
-
-  expect(fixture.sessionCreateCalls.length).toBe(1)
-  expect(fixture.editor.placeholder).toBeUndefined()
+  await waitFor(() => fixture.editor.placeholder === MARKER)
 
   if (typeof cleanup === "function") await cleanup()
 })
@@ -650,7 +688,7 @@ test("accept refuses a ready suggestion from another session", async () => {
   fixture.renderSlot()
 
   fixture.fire("session.status", idleEvent)
-  await waitFor(() => fixture.editor.placeholder === ` [→] ${SUGGESTION}`)
+  await waitFor(() => fixture.editor.placeholder === MARKER)
 
   // Router moved to another session without a tui.session.select event.
   ;(fixture.context.ui.router as any).current = () => ({ type: "session", sessionID: "ses_other" })
@@ -678,7 +716,7 @@ test("cancelling a staged revert asks for a fresh prediction", async () => {
   fixture.renderSlot()
 
   fixture.fire("session.status", idleEvent)
-  await waitFor(() => fixture.editor.placeholder === ` [→] ${SUGGESTION}`)
+  await waitFor(() => fixture.editor.placeholder === MARKER)
   const before = fixture.sessionCreateCalls.length
 
   fixture.fire("session.revert.staged", { sessionID: SESSION_ID, revert: {} })
@@ -686,20 +724,7 @@ test("cancelling a staged revert asks for a fresh prediction", async () => {
   fixture.fire("session.revert.cleared", { sessionID: SESSION_ID })
 
   await waitFor(() => fixture.sessionCreateCalls.length === before + 1)
-  await waitFor(() => fixture.editor.placeholder === ` [→] ${SUGGESTION}`)
-
-  if (typeof cleanup === "function") await cleanup()
-})
-
-test("an older host version warns once at startup", async () => {
-  const fixture = createFixture()
-  ;(fixture.context.app as any).version = "2.0.21"
-  const cleanup = await plugin.setup(fixture.context)
-  fixture.renderSlot()
-
-  expect(fixture.toasts.length).toBe(1)
-  expect(fixture.toasts[0].variant).toBe("warning")
-  expect(fixture.toasts[0].message).toContain("older than 2.0.22")
+  await waitFor(() => fixture.editor.placeholder === MARKER)
 
   if (typeof cleanup === "function") await cleanup()
 })
@@ -710,17 +735,6 @@ test("session.idle triggers a prediction when the status event is missing", asyn
   fixture.renderSlot()
 
   fixture.fire("session.idle", { sessionID: SESSION_ID })
-  await waitFor(() => fixture.sessionCreateCalls.length === 1)
-
-  if (typeof cleanup === "function") await cleanup()
-})
-
-test("session.idle without a session id (OpenCode 2.0.x) uses the focused session", async () => {
-  const fixture = createFixture()
-  const cleanup = await plugin.setup(fixture.context)
-  fixture.renderSlot()
-
-  fixture.fire("session.idle", undefined)
   await waitFor(() => fixture.sessionCreateCalls.length === 1)
 
   if (typeof cleanup === "function") await cleanup()

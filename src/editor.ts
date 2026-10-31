@@ -18,10 +18,7 @@ export type TextareaLike = {
   readonly isDestroyed: boolean
   insertText(text: string): void
   gotoBufferEnd(options?: { select?: boolean }): void
-  // OpenTUI 0.6+ (OpenCode 2.1+) replaced getLayoutNode().markDirty() with
-  // invalidateIntrinsicSize(); accept either so both 0.6+ and 0.5 hosts work.
-  invalidateIntrinsicSize?(): void
-  getLayoutNode?(): { markDirty(): void }
+  invalidateIntrinsicSize(): void
 }
 
 /** Returns `editor` when it is a live, writable multi-line textarea; otherwise null. */
@@ -32,9 +29,7 @@ export function asPromptTextarea(editor: unknown): TextareaLike | null {
   if (typeof candidate.plainText !== "string") return null
   if (typeof candidate.insertText !== "function") return null
   if (typeof candidate.gotoBufferEnd !== "function") return null
-  if (typeof candidate.invalidateIntrinsicSize !== "function" && typeof candidate.getLayoutNode !== "function") {
-    return null
-  }
+  if (typeof candidate.invalidateIntrinsicSize !== "function") return null
   if ("maxLength" in candidate) return null // single-line InputRenderable
   return candidate as TextareaLike
 }
