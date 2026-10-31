@@ -19,10 +19,7 @@ export type TextareaLike = {
     gotoBufferEnd(options?: {
         select?: boolean;
     }): void;
-    invalidateIntrinsicSize?(): void;
-    getLayoutNode?(): {
-        markDirty(): void;
-    };
+    invalidateIntrinsicSize(): void;
 };
 /** Returns `editor` when it is a live, writable multi-line textarea; otherwise null. */
 export declare function asPromptTextarea(editor: unknown): TextareaLike | null;

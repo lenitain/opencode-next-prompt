@@ -6,14 +6,9 @@ const ARROW_KEYS = {
     up: "↑",
     down: "↓",
 };
-// Fallback for hosts that do not expose a shell mode through the keymap; the
-// keymap mode is authoritative when available.
-const SHELL_PLACEHOLDER_PREFIX = "Run a command";
-export function isShellPlaceholder(placeholder) {
-    return typeof placeholder === "string" && placeholder.startsWith(SHELL_PLACEHOLDER_PREFIX);
-}
-export function isShellMode(context, editor) {
-    return context.keymap.mode?.current?.() === "shell" || isShellPlaceholder(editor.placeholder);
+/** Shell mode edits a command, not a message, so the suggestion stays hidden. */
+export function isShellMode(context) {
+    return context.keymap.mode.current() === "shell";
 }
 function displayKey(key) {
     return ARROW_KEYS[key] ?? key;
@@ -49,7 +44,7 @@ export function createPlaceholderController(context, store, sessionID, acceptKey
         });
         if (!editor)
             return;
-        if (isShellMode(context, editor))
+        if (isShellMode(context))
             return;
         if (current.kind === "ready" && current.sessionID === sessionID()) {
             if (!isOurs(editor.placeholder)) {

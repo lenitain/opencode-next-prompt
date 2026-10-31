@@ -1,8 +1,7 @@
 import type { Context } from "@opencode/plugin/tui/context";
 import type { SuggestionStore } from "./state.js";
-import { type TextareaLike } from "./editor.js";
-export declare function isShellPlaceholder(placeholder: unknown): boolean;
-export declare function isShellMode(context: Context, editor: TextareaLike): boolean;
+/** Shell mode edits a command, not a message, so the suggestion stays hidden. */
+export declare function isShellMode(context: Context): boolean;
 /**
  * Renders the suggestion into the prompt textarea's placeholder. There is no
  * slot inside the input in V2, so the controller writes the placeholder

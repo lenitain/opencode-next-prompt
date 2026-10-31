@@ -15,7 +15,7 @@ export type ModelResolution = {
     /** A recoverable problem, e.g. an invalid title model falling back to the session model. */
     warning?: string;
 };
-export declare const NEXT_PROMPT_AGENT_IDS: readonly ["next-prompt", "next_prompt"];
+export declare const NEXT_PROMPT_AGENT_IDS: readonly string[];
 type ParsedSpec = {
     providerID?: string;
     id: string;
