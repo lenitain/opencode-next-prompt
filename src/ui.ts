@@ -1,6 +1,6 @@
 import type { Context } from "@opencode/plugin/tui/context"
 import type { SuggestionStore } from "./state.ts"
-import { asPromptTextarea } from "./editor.ts"
+import { asPromptTextarea, type TextareaLike } from "./editor.ts"
 import { debug } from "./debug.ts"
 
 const ARROW_KEYS: Record<string, string> = {
@@ -10,10 +10,16 @@ const ARROW_KEYS: Record<string, string> = {
   down: "↓",
 }
 
+// Fallback for hosts that do not expose a shell mode through the keymap; the
+// keymap mode is authoritative when available.
 const SHELL_PLACEHOLDER_PREFIX = "Run a command"
 
 export function isShellPlaceholder(placeholder: unknown): boolean {
   return typeof placeholder === "string" && placeholder.startsWith(SHELL_PLACEHOLDER_PREFIX)
+}
+
+export function isShellMode(context: Context, editor: TextareaLike): boolean {
+  return context.keymap.mode?.current?.() === "shell" || isShellPlaceholder(editor.placeholder)
 }
 
 function displayKey(key: string): string {
@@ -28,15 +34,24 @@ function displayKey(key: string): string {
  * memo (session switch, resize, shell change) — on every frame while a
  * suggestion is live. `sessionID()` answers which session the prompt edits.
  *
- * Deliberately free of solid-js: a plugin loaded at runtime resolves solid's
- * server build (createEffect would be a no-op) and the plugin's copy of solid
- * is not the TUI's copy anyway, so side effects here must not depend on it.
+ * The previous placeholder is saved before the first overwrite and restored
+ * when the suggestion is discarded, so OpenCode's own hint is not lost.
  *
- * The placeholder is only cleared when it is ours (it starts with the accept
- * key marker), so OpenCode's own placeholder list is left untouched.
+ * Deliberately free of solid-js: a plugin loaded at runtime resolves solid's
+ * server build under bun's node conditions (createEffect would be a no-op)
+ * and the plugin's copy of solid is not the TUI's copy anyway, so side effects
+ * here must not depend on it.
  */
-export function createPlaceholderController(context: Context, store: SuggestionStore, sessionID: () => string | undefined, acceptKey: string) {
+export function createPlaceholderController(
+  context: Context,
+  store: SuggestionStore,
+  sessionID: () => string | undefined,
+  acceptKey: string,
+) {
   const marker = ` [${displayKey(acceptKey)}] `
+  let savedPlaceholder: string | null | undefined
+
+  const isOurs = (value: unknown): boolean => typeof value === "string" && value.startsWith(marker)
 
   const apply = (): void => {
     const editor = asPromptTextarea(context.renderer.currentFocusedEditor)
@@ -48,16 +63,22 @@ export function createPlaceholderController(context: Context, store: SuggestionS
       editor: editor !== null,
     })
     if (!editor) return
-    if (isShellPlaceholder(editor.placeholder)) return
+    if (isShellMode(context, editor)) return
+
     if (current.kind === "ready" && current.sessionID === sessionID()) {
+      if (!isOurs(editor.placeholder)) {
+        savedPlaceholder = typeof editor.placeholder === "string" ? editor.placeholder : null
+      }
       const desired = marker + current.text
       // Write only on real changes: the setter is idempotent, which is what
       // lets the frame reconciler below settle after restoring our marker.
       if (editor.placeholder !== desired) editor.placeholder = desired
       return
     }
-    if (typeof editor.placeholder === "string" && editor.placeholder.startsWith(marker)) {
-      editor.placeholder = null
+
+    if (isOurs(editor.placeholder)) {
+      editor.placeholder = savedPlaceholder ?? null
+      savedPlaceholder = undefined
     }
   }
 
@@ -83,9 +104,8 @@ export function createPlaceholderController(context: Context, store: SuggestionS
       context.renderer.off("focused_editor", apply)
       context.renderer.off("frame", onFrame)
       const editor = asPromptTextarea(context.renderer.currentFocusedEditor)
-      if (editor && typeof editor.placeholder === "string" && editor.placeholder.startsWith(marker)) {
-        editor.placeholder = null
-      }
+      if (editor && isOurs(editor.placeholder)) editor.placeholder = savedPlaceholder ?? null
+      savedPlaceholder = undefined
     },
   }
 }

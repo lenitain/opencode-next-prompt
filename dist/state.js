@@ -34,7 +34,7 @@ export function createSuggestionStore() {
             return generation;
         },
         commit(generation, sessionID, text) {
-            if (state.kind !== "predicting" || state.generation !== generation)
+            if (state.kind !== "predicting" || state.generation !== generation || state.sessionID !== sessionID)
                 return;
             set(text ? { kind: "ready", sessionID, text, generation } : { kind: "idle" });
         },

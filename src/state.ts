@@ -44,7 +44,7 @@ export function createSuggestionStore() {
     },
 
     commit(generation: number, sessionID: string, text: string | null): void {
-      if (state.kind !== "predicting" || state.generation !== generation) return
+      if (state.kind !== "predicting" || state.generation !== generation || state.sessionID !== sessionID) return
       set(text ? { kind: "ready", sessionID, text, generation } : { kind: "idle" })
     },
 

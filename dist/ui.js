@@ -6,9 +6,14 @@ const ARROW_KEYS = {
     up: "↑",
     down: "↓",
 };
+// Fallback for hosts that do not expose a shell mode through the keymap; the
+// keymap mode is authoritative when available.
 const SHELL_PLACEHOLDER_PREFIX = "Run a command";
 export function isShellPlaceholder(placeholder) {
     return typeof placeholder === "string" && placeholder.startsWith(SHELL_PLACEHOLDER_PREFIX);
+}
+export function isShellMode(context, editor) {
+    return context.keymap.mode?.current?.() === "shell" || isShellPlaceholder(editor.placeholder);
 }
 function displayKey(key) {
     return ARROW_KEYS[key] ?? key;
@@ -21,15 +26,18 @@ function displayKey(key) {
  * memo (session switch, resize, shell change) — on every frame while a
  * suggestion is live. `sessionID()` answers which session the prompt edits.
  *
- * Deliberately free of solid-js: a plugin loaded at runtime resolves solid's
- * server build (createEffect would be a no-op) and the plugin's copy of solid
- * is not the TUI's copy anyway, so side effects here must not depend on it.
+ * The previous placeholder is saved before the first overwrite and restored
+ * when the suggestion is discarded, so OpenCode's own hint is not lost.
  *
- * The placeholder is only cleared when it is ours (it starts with the accept
- * key marker), so OpenCode's own placeholder list is left untouched.
+ * Deliberately free of solid-js: a plugin loaded at runtime resolves solid's
+ * server build under bun's node conditions (createEffect would be a no-op)
+ * and the plugin's copy of solid is not the TUI's copy anyway, so side effects
+ * here must not depend on it.
  */
 export function createPlaceholderController(context, store, sessionID, acceptKey) {
     const marker = ` [${displayKey(acceptKey)}] `;
+    let savedPlaceholder;
+    const isOurs = (value) => typeof value === "string" && value.startsWith(marker);
     const apply = () => {
         const editor = asPromptTextarea(context.renderer.currentFocusedEditor);
         const current = store.read();
@@ -41,9 +49,12 @@ export function createPlaceholderController(context, store, sessionID, acceptKey
         });
         if (!editor)
             return;
-        if (isShellPlaceholder(editor.placeholder))
+        if (isShellMode(context, editor))
             return;
         if (current.kind === "ready" && current.sessionID === sessionID()) {
+            if (!isOurs(editor.placeholder)) {
+                savedPlaceholder = typeof editor.placeholder === "string" ? editor.placeholder : null;
+            }
             const desired = marker + current.text;
             // Write only on real changes: the setter is idempotent, which is what
             // lets the frame reconciler below settle after restoring our marker.
@@ -51,8 +62,9 @@ export function createPlaceholderController(context, store, sessionID, acceptKey
                 editor.placeholder = desired;
             return;
         }
-        if (typeof editor.placeholder === "string" && editor.placeholder.startsWith(marker)) {
-            editor.placeholder = null;
+        if (isOurs(editor.placeholder)) {
+            editor.placeholder = savedPlaceholder ?? null;
+            savedPlaceholder = undefined;
         }
     };
     // TUI overwrites trigger a render, so reconciling on the next frame
@@ -76,9 +88,9 @@ export function createPlaceholderController(context, store, sessionID, acceptKey
             context.renderer.off("focused_editor", apply);
             context.renderer.off("frame", onFrame);
             const editor = asPromptTextarea(context.renderer.currentFocusedEditor);
-            if (editor && typeof editor.placeholder === "string" && editor.placeholder.startsWith(marker)) {
-                editor.placeholder = null;
-            }
+            if (editor && isOurs(editor.placeholder))
+                editor.placeholder = savedPlaceholder ?? null;
+            savedPlaceholder = undefined;
         },
     };
 }

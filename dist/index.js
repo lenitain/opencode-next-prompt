@@ -1,84 +1,114 @@
 import { Plugin } from "@opencode/plugin/tui";
 import { createSuggestionStore } from "./state.js";
 import { createPredictor } from "./predict.js";
-import { createPlaceholderController, isShellPlaceholder } from "./ui.js";
+import { createPlaceholderController, isShellMode } from "./ui.js";
 import { asPromptTextarea } from "./editor.js";
+import { normalizeOptions } from "./options.js";
+import { resolvePredictionModel } from "./model.js";
+import { buildPrompt, collectConversation, lastTurnKey } from "./conversation.js";
 import { debug } from "./debug.js";
-const DEFAULT_OPTIONS = {
-    acceptKey: "right",
-    timeoutMs: 20_000,
-    includeToolContext: false,
-};
+import { errorMessage } from "./errors.js";
 const RETRY_DELAY_MS = 800;
-const THINK_TAG = /<\/?think>[\s\S]*?<\/think>\s*/g;
+const MIN_HOST_VERSION = [2, 0, 22];
 const opencodeNextPrompt = Plugin.define({
     id: "opencode-next-prompt",
     setup(context) {
-        const options = { ...DEFAULT_OPTIONS, ...context.options };
+        const { options, warnings } = normalizeOptions(context.options);
+        for (const warning of warnings) {
+            context.ui.toast.show({ variant: "warning", title: "next-prompt", message: warning, duration: 10_000 });
+        }
+        if (!versionAtLeast(context.app.version, MIN_HOST_VERSION)) {
+            context.ui.toast.show({
+                variant: "warning",
+                title: "next-prompt",
+                message: `OpenCode ${context.app.version} is older than 2.0.22; predictions will use a compatibility fallback. Upgrade OpenCode for project-scoped models.`,
+                duration: 12_000,
+            });
+        }
         const store = createSuggestionStore();
-        // The controller gates on the session the prompt is editing; the router
-        // always reports the focused session (per-tab footers cannot diverge
-        // from it), and predictions commit against the same source.
-        const placeholder = createPlaceholderController(context, store, () => currentSessionID(), options.acceptKey);
         let disposed = false;
-        const currentSessionID = () => {
+        let activeSessionID = currentSessionID();
+        let inFlightTurnKey;
+        let completedTurnKey;
+        let retriedTurnKey;
+        let retryTimer;
+        let reportedModelIssue;
+        let reportedModelWarning;
+        const placeholder = createPlaceholderController(context, store, () => currentSessionID(), options.acceptKey);
+        const predictor = createPredictor(context.client, { timeoutMs: options.timeoutMs });
+        function currentSessionID() {
             const route = context.ui.router.current();
             if (route.type !== "session")
                 return undefined;
+            if (context.ui.tabs.enabled()) {
+                const active = context.ui.tabs.list().find((tab) => tab.active);
+                if (active)
+                    return active.sessionID;
+            }
             return route.sessionID;
-        };
-        const promptInputIsEmpty = () => {
-            const editor = asPromptTextarea(context.renderer.currentFocusedEditor);
-            return editor !== null && editor.plainText === "" && !isShellPlaceholder(editor.placeholder);
-        };
-        const conversationTurns = (sessionID) => {
-            const result = [];
-            for (const message of context.data.session.message.list(sessionID)) {
-                if (message.type === "user") {
-                    const text = message.text.replace(THINK_TAG, "").trim();
-                    if (text)
-                        result.push({ id: message.id, role: "user", text });
-                    continue;
-                }
-                if (message.type !== "assistant")
-                    continue;
-                const text = message.content
-                    .map((part) => {
-                    if (part.type === "text")
-                        return part.text.replace(THINK_TAG, "");
-                    return options.includeToolContext ? summarizeToolPart(part) : "";
-                })
-                    .join("\n")
-                    .trim();
-                if (text)
-                    result.push({ id: message.id, role: "assistant", text });
-            }
-            return result;
-        };
-        const lastUserMessageID = (sessionID) => {
-            for (const message of context.data.session.message.list(sessionID).toReversed()) {
-                if (message.type === "user")
-                    return message.id;
-            }
-            return undefined;
-        };
-        let activeSessionID = currentSessionID();
-        let inFlightUserMessageID;
-        let completedUserMessageID;
-        let retriedUserMessageID;
-        let reportedModelIssue;
-        const predictor = createPredictor(context.client, {
-            timeoutMs: options.timeoutMs,
-        });
-        const syncActiveSession = () => {
+        }
+        function focusedPrompt() {
+            return asPromptTextarea(context.renderer.currentFocusedEditor);
+        }
+        function promptInputIsEmpty() {
+            const editor = focusedPrompt();
+            return editor !== null && editor.plainText === "" && !isShellMode(context, editor);
+        }
+        function requestPrediction() {
+            if (disposed)
+                return;
+            clearRetry();
+            void maybePredict().catch((error) => debug("prediction crashed", errorMessage(error)));
+        }
+        function syncActiveSession() {
             const current = currentSessionID();
             if (current !== activeSessionID) {
                 activeSessionID = current;
+                resetIssues();
                 invalidate();
             }
             return current;
-        };
-        const maybePredict = async () => {
+        }
+        function resetIssues() {
+            reportedModelIssue = undefined;
+            reportedModelWarning = undefined;
+        }
+        function showModelNotice(message, variant) {
+            const previous = variant === "error" ? reportedModelIssue : reportedModelWarning;
+            if (previous === message)
+                return;
+            if (variant === "error")
+                reportedModelIssue = message;
+            else
+                reportedModelWarning = message;
+            context.ui.toast.show({ variant, title: "next-prompt", message, duration: 8_000 });
+        }
+        function clearRetry() {
+            if (retryTimer !== undefined) {
+                clearTimeout(retryTimer);
+                retryTimer = undefined;
+            }
+        }
+        function scheduleRetry(turnKey) {
+            if (disposed || retriedTurnKey === turnKey)
+                return;
+            retriedTurnKey = turnKey;
+            clearRetry();
+            retryTimer = setTimeout(() => {
+                retryTimer = undefined;
+                if (!disposed)
+                    requestPrediction();
+            }, RETRY_DELAY_MS);
+        }
+        function invalidate() {
+            clearRetry();
+            store.discard();
+            inFlightTurnKey = undefined;
+            completedTurnKey = undefined;
+            retriedTurnKey = undefined;
+            void predictor.dispose();
+        }
+        async function maybePredict() {
             if (disposed)
                 return;
             const sessionID = syncActiveSession();
@@ -91,29 +121,36 @@ const opencodeNextPrompt = Plugin.define({
                 debug("skip", { status });
                 return;
             }
-            const userMessageID = lastUserMessageID(sessionID);
-            if (!userMessageID) {
+            const messages = context.data.session.message.list(sessionID);
+            const turnKey = lastTurnKey(messages);
+            if (!turnKey) {
                 debug("skip", "no user message");
                 return;
             }
-            if (userMessageID === completedUserMessageID || userMessageID === inFlightUserMessageID) {
-                debug("skip", "message already handled");
+            if (turnKey === completedTurnKey || turnKey === inFlightTurnKey) {
+                debug("skip", "turn already handled");
                 return;
             }
             const session = context.data.session.get(sessionID);
             const location = session?.location ?? context.location;
-            const modelRef = resolveModelRef(options.model, session?.model, context, location);
-            const modelIssue = checkModelConfig(modelRef, context, location);
-            if (modelIssue) {
-                if (reportedModelIssue !== modelIssue) {
-                    reportedModelIssue = modelIssue;
-                    debug("prediction skipped", modelIssue);
-                    context.ui.toast.show({ variant: "error", title: "next-prompt", message: modelIssue, duration: 8000 });
-                }
+            const resolution = resolvePredictionModel({
+                spec: options.model,
+                variant: options.variant,
+                sessionModel: session?.model,
+                context,
+                location,
+            });
+            if (resolution.issue) {
+                showModelNotice(resolution.issue, "error");
                 return;
             }
-            const turns = conversationTurns(sessionID);
-            if (turns.length === 0) {
+            reportedModelIssue = undefined;
+            if (resolution.warning)
+                showModelNotice(resolution.warning, "warning");
+            else
+                reportedModelWarning = undefined;
+            const conversation = collectConversation(messages, options.includeToolContext);
+            if (conversation.turns.length === 0) {
                 debug("skip", "no conversation turns");
                 return;
             }
@@ -122,60 +159,52 @@ const opencodeNextPrompt = Plugin.define({
                 debug("skip", "store busy");
                 return;
             }
-            inFlightUserMessageID = userMessageID;
-            const variant = resolveVariant(options.variant, modelRef);
-            const selectedModel = modelRef ? { providerID: modelRef.providerID, id: modelRef.id } : session?.model;
+            inFlightTurnKey = turnKey;
+            const model = resolution.model;
+            const selectedModel = model ? { providerID: model.providerID, id: model.id } : undefined;
             try {
-                debug("predicting", { sessionID, model: selectedModel, variant, source: modelRef?.source });
-                const result = await predictor.predict(sessionID, selectedModel, turns, variant);
-                if (inFlightUserMessageID !== userMessageID)
+                debug("predicting", {
+                    sessionID,
+                    model: selectedModel,
+                    variant: model?.variant,
+                    source: model?.source,
+                });
+                const result = await predictor.predict(sessionID, selectedModel, buildPrompt(conversation), model?.variant);
+                if (inFlightTurnKey !== turnKey)
                     return;
                 debug("predict result", { ok: result.ok, length: result.ok ? (result.text?.length ?? 0) : -1 });
                 if (result.ok) {
-                    completedUserMessageID = userMessageID;
+                    completedTurnKey = turnKey;
                     store.commit(generation, sessionID, result.text);
                 }
                 else {
                     store.discard();
-                    scheduleRetry(userMessageID);
+                    scheduleRetry(turnKey);
                 }
             }
             catch (error) {
                 debug("prediction failed", errorMessage(error));
-                if (inFlightUserMessageID !== userMessageID)
+                if (inFlightTurnKey !== turnKey)
                     return;
                 store.discard();
-                scheduleRetry(userMessageID);
+                scheduleRetry(turnKey);
             }
             finally {
-                if (inFlightUserMessageID === userMessageID)
-                    inFlightUserMessageID = undefined;
+                if (inFlightTurnKey === turnKey)
+                    inFlightTurnKey = undefined;
             }
-        };
-        const scheduleRetry = (userMessageID) => {
-            if (retriedUserMessageID === userMessageID)
-                return;
-            retriedUserMessageID = userMessageID;
-            setTimeout(() => void maybePredict(), RETRY_DELAY_MS);
-        };
-        const invalidate = () => {
-            store.discard();
-            inFlightUserMessageID = undefined;
-            completedUserMessageID = undefined;
-            retriedUserMessageID = undefined;
-            void predictor.dispose();
-        };
-        const accept = () => {
+        }
+        function accept() {
             const current = store.read();
-            if (current.kind !== "ready")
+            if (current.kind !== "ready" || current.sessionID !== currentSessionID())
                 return;
-            const editor = asPromptTextarea(context.renderer.currentFocusedEditor);
+            const editor = focusedPrompt();
             if (!editor)
                 return;
             // Same insertion path the host uses for the `tui.prompt.append` event.
             editor.insertText(current.text);
             setTimeout(() => {
-                if (editor.isDestroyed)
+                if (disposed || editor.isDestroyed)
                     return;
                 // OpenTUI 0.6+ removed getLayoutNode() in favor of invalidateIntrinsicSize();
                 // fall back to getLayoutNode().markDirty() for OpenCode 2.0.x (OpenTUI 0.5).
@@ -188,70 +217,19 @@ const opencodeNextPrompt = Plugin.define({
                 editor.gotoBufferEnd();
                 context.renderer.requestRender();
             }, 0);
-        };
-        const unsubscribers = [];
-        unsubscribers.push(context.data.on("session.status", (event) => {
-            if (event.data.sessionID !== syncActiveSession())
-                return;
-            const type = event.data.status.type;
-            debug("session.status event", { type });
-            if (type === "busy") {
-                store.discard();
-            }
-            else if (type === "idle") {
-                if (store.read().kind === "idle")
-                    void maybePredict();
-            }
-        }));
-        // V2 delivery guarantee: feature-plugins subscribe to execution events,
-        // while session.status appears not to reach clients at all. Mirrors the
-        // V1 busy/idle pair: started ≈ busy (user submitted), ended ≈ idle.
-        unsubscribers.push(context.data.on("session.execution.started", (event) => {
-            if (event.data.sessionID !== syncActiveSession())
-                return;
-            debug("execution started");
-            store.discard();
-        }));
-        for (const type of ["session.execution.succeeded", "session.execution.interrupted"]) {
-            unsubscribers.push(context.data.on(type, (event) => {
-                if (event.data.sessionID !== syncActiveSession())
-                    return;
-                debug(type);
-                if (store.read().kind === "idle")
-                    void maybePredict();
-            }));
         }
-        // Diagnostic: what actually streams. Logs status/execution events plus a
-        // capped sample of distinct event types.
-        const seenEventTypes = new Set();
-        unsubscribers.push(context.data.listen(({ details }) => {
-            const type = details.type;
-            if (/^session\.(status|execution|idle|error)/.test(type)) {
-                debug("event", type);
-                return;
-            }
-            if (seenEventTypes.size < 40 && !seenEventTypes.has(type)) {
-                seenEventTypes.add(type);
-                debug("event(first-seen)", type);
-            }
-        }));
-        unsubscribers.push(context.data.on("tui.session.select", () => {
-            activeSessionID = currentSessionID();
-            invalidate();
-        }));
-        // V1's message.removed / message.part.removed: history changed under us.
-        unsubscribers.push(context.data.on("session.revert.committed", (event) => {
-            if (event.data.sessionID === currentSessionID())
-                invalidate();
-        }));
-        unsubscribers.push(context.data.on("session.deleted", (event) => {
-            if (event.data.sessionID === currentSessionID())
-                invalidate();
-        }));
         // The accept command itself; registered from the app slot render below
         // (keymap layers need a live solid owner — see the slot comment).
         const acceptLayer = () => ({
             priority: 1000,
+            // Keep the binding inside the prompt textarea: a ready suggestion must
+            // never intercept the right arrow in dialogs, editors, or shell mode.
+            target: () => {
+                const editor = focusedPrompt();
+                if (!editor || isShellMode(context, editor))
+                    return null;
+                return editor;
+            },
             commands: [
                 {
                     id: "opencode-next-prompt.accept",
@@ -288,8 +266,77 @@ const opencodeNextPrompt = Plugin.define({
                 return null;
             },
         });
+        const unsubscribers = [];
+        const watchIdle = (type) => {
+            unsubscribers.push(context.data.on(type, (event) => {
+                // OpenCode 2.0.x's `session.idle` event carries no session id; it is
+                // safe to treat it as the focused session. Newer hosts include it.
+                const eventSessionID = event.data?.sessionID;
+                const current = syncActiveSession();
+                if (eventSessionID !== undefined && eventSessionID !== current)
+                    return;
+                if (!current)
+                    return;
+                debug(type);
+                if (store.read().kind === "idle")
+                    requestPrediction();
+            }));
+        };
+        unsubscribers.push(context.data.on("session.status", (event) => {
+            if (event.data.sessionID !== syncActiveSession())
+                return;
+            const type = event.data.status.type;
+            debug("session.status event", { type });
+            if (type === "busy")
+                invalidate();
+            else if (type === "idle" && store.read().kind === "idle")
+                requestPrediction();
+        }));
+        unsubscribers.push(context.data.on("session.execution.started", (event) => {
+            if (event.data.sessionID !== syncActiveSession())
+                return;
+            debug("execution started");
+            // A new turn (or a regenerated reply) invalidates both the suggestion
+            // and the in-flight prediction, so a late result cannot win.
+            invalidate();
+        }));
+        for (const type of [
+            "session.execution.succeeded",
+            "session.execution.interrupted",
+            "session.execution.failed",
+            "session.compaction.ended",
+        ]) {
+            watchIdle(type);
+        }
+        watchIdle("session.idle");
+        for (const type of ["session.revert.staged", "session.revert.committed"]) {
+            unsubscribers.push(context.data.on(type, (event) => {
+                if (event.data.sessionID === syncActiveSession())
+                    invalidate();
+            }));
+        }
+        unsubscribers.push(context.data.on("session.revert.cleared", (event) => {
+            if (event.data.sessionID !== syncActiveSession())
+                return;
+            if (store.read().kind === "idle")
+                requestPrediction();
+        }));
+        unsubscribers.push(context.data.on("session.compaction.started", (event) => {
+            if (event.data.sessionID === syncActiveSession())
+                invalidate();
+        }));
+        unsubscribers.push(context.data.on("session.deleted", (event) => {
+            if (event.data.sessionID === currentSessionID() || event.data.sessionID === activeSessionID)
+                invalidate();
+        }));
+        unsubscribers.push(context.data.on("tui.session.select", () => {
+            activeSessionID = currentSessionID();
+            resetIssues();
+            invalidate();
+        }));
         return () => {
             disposed = true;
+            clearRetry();
             for (const off of unsubscribers)
                 off();
             placeholder.dispose();
@@ -299,141 +346,17 @@ const opencodeNextPrompt = Plugin.define({
         };
     },
 });
-const NEXT_PROMPT_AGENT_IDS = ["next-prompt", "next_prompt"];
-function findConfiguredAgentModel(context, location) {
-    const agents = context.data.location.agent?.list(location);
-    if (!agents)
-        return undefined;
-    for (const id of NEXT_PROMPT_AGENT_IDS) {
-        const match = agents.find((agent) => agent.id === id && agent.model !== undefined);
-        if (match?.model)
-            return { model: match.model, source: "agent:next-prompt", explicit: true };
+function versionAtLeast(version, minimum) {
+    const match = version.match(/(\d+)\.(\d+)\.(\d+)/);
+    if (!match)
+        return true;
+    const current = [Number(match[1]), Number(match[2]), Number(match[3])];
+    for (let index = 0; index < minimum.length; index += 1) {
+        const left = current[index] ?? 0;
+        const right = minimum[index] ?? 0;
+        if (left !== right)
+            return left > right;
     }
-    const titleAgent = agents.find((agent) => agent.id === "title" && agent.model !== undefined);
-    if (titleAgent?.model)
-        return { model: titleAgent.model, source: "agent:title", explicit: false };
-    return undefined;
-}
-function parseSpec(spec) {
-    const hash = spec.indexOf("#");
-    const base = hash >= 0 ? spec.slice(0, hash) : spec;
-    const variant = hash >= 0 && hash < spec.length - 1 ? spec.slice(hash + 1) : undefined;
-    const slash = base.indexOf("/");
-    if (slash > 0 && slash < base.length - 1) {
-        return { providerID: base.slice(0, slash), id: base.slice(slash + 1), variant };
-    }
-    return { id: base, variant };
-}
-function resolveModelRef(spec, sessionModel, context, location) {
-    if (spec) {
-        const parsed = parseSpec(spec);
-        const providerID = parsed.providerID ??
-            sessionModel?.providerID ??
-            findConfiguredAgentModel(context, location)?.model.providerID;
-        if (!providerID || !parsed.id)
-            return undefined;
-        return {
-            providerID,
-            id: parsed.id,
-            variant: parsed.variant,
-            explicit: true,
-            source: "options",
-            model: findModel(context, providerID, parsed.id, location),
-        };
-    }
-    const agentConfig = findConfiguredAgentModel(context, location);
-    if (agentConfig) {
-        const { providerID, id, variant } = agentConfig.model;
-        return {
-            providerID,
-            id,
-            variant,
-            explicit: agentConfig.explicit,
-            source: agentConfig.source,
-            model: findModel(context, providerID, id, location),
-        };
-    }
-    const providerID = sessionModel?.providerID;
-    const modelID = sessionModel?.id;
-    if (!providerID || !modelID)
-        return undefined;
-    return {
-        providerID,
-        id: modelID,
-        explicit: false,
-        source: "session",
-        model: findModel(context, providerID, modelID, location),
-    };
-}
-function findModel(context, providerID, id, location) {
-    return context.data.location.model
-        .list(location)
-        ?.find((item) => item.providerID === providerID && (item.id ?? item.modelID) === id);
-}
-function checkModelConfig(ref, context, location) {
-    if (!ref?.explicit)
-        return undefined;
-    const providers = context.data.location.provider.list(location);
-    if (providers && !providers.some((item) => item.id === ref.providerID)) {
-        const available = providers.map((item) => item.id).join(", ");
-        return `model config error: provider "${ref.providerID}" not found${available ? ` (available providers: ${available})` : ""}`;
-    }
-    const models = context.data.location.model.list(location);
-    if (models && !models.some((item) => item.providerID === ref.providerID && (item.id ?? item.modelID) === ref.id)) {
-        const available = models
-            .filter((item) => item.providerID === ref.providerID)
-            .map((item) => item.id ?? item.modelID)
-            .slice(0, 10)
-            .join(", ");
-        const count = models.filter((item) => item.providerID === ref.providerID).length;
-        return `model config error: model "${ref.id}" not found on provider "${ref.providerID}"${available ? ` (available models: ${available}${count > 10 ? ", ..." : ""})` : ""}`;
-    }
-    return undefined;
-}
-const VARIANT_ORDER = ["none", "minimal", "min", "low", "medium", "high", "xhigh", "max"];
-function resolveVariant(configVariant, ref) {
-    if (configVariant === "default")
-        return undefined;
-    if (configVariant)
-        return configVariant;
-    if (ref?.variant)
-        return ref.variant;
-    const variants = ref?.model?.variants;
-    if (!variants || variants.length === 0)
-        return undefined;
-    const names = variants.map((item) => item.id);
-    return names.toSorted((a, b) => variantRank(a) - variantRank(b))[0];
-}
-function variantRank(name) {
-    const index = VARIANT_ORDER.indexOf(name.toLowerCase());
-    return index === -1 ? VARIANT_ORDER.length : index;
-}
-function errorMessage(error) {
-    if (error instanceof Error)
-        return error.message;
-    if (typeof error === "string")
-        return error;
-    if (error && typeof error === "object") {
-        const candidate = error.message;
-        if (typeof candidate === "string")
-            return candidate;
-    }
-    try {
-        return JSON.stringify(error);
-    }
-    catch {
-        return String(error);
-    }
-}
-const TOOL_SUMMARY_CHARS = 150;
-function summarizeToolPart(part) {
-    const tool = part;
-    if (tool.type !== "tool" || !tool.state || tool.state.status === "running" || tool.state.status === "streaming")
-        return "";
-    const input = JSON.stringify(tool.state.input ?? {});
-    const output = tool.state.metadata?.output ?? "";
-    const inputText = input.length > 80 ? input.slice(0, 79) + "…" : input;
-    const outputText = output.length > TOOL_SUMMARY_CHARS ? output.slice(0, TOOL_SUMMARY_CHARS - 1) + "…" : output;
-    return `[tool:${tool.name ?? "?"}] ${inputText} → ${outputText || tool.state.status || ""}`;
+    return true;
 }
 export default opencodeNextPrompt;

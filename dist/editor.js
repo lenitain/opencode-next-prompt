@@ -24,8 +24,7 @@ export function asPromptTextarea(editor) {
         return null;
     if (typeof candidate.gotoBufferEnd !== "function")
         return null;
-    if (typeof candidate.invalidateIntrinsicSize !== "function" &&
-        typeof candidate.getLayoutNode !== "function") {
+    if (typeof candidate.invalidateIntrinsicSize !== "function" && typeof candidate.getLayoutNode !== "function") {
         return null;
     }
     if ("maxLength" in candidate)
