@@ -291,9 +291,9 @@ test("idle triggers prediction, placeholder shows, accept key fills, busy clears
   const call = fixture.sessionGenerateCalls[0]
   expect(call.sessionID).toBe("ses_helper")
   // tool-suppression instruction + delimited conversation context in the prompt
-  expect(call.prompt).toContain("Do not call any tools and do not take any actions.")
+  expect(call.prompt).toContain("NO_SUGGESTION")
   expect(call.prompt).toContain('<turn role="user">修复登录问题</turn>')
-  expect(call.prompt).toContain('<turn role="assistant">已经修好了，原因是时区判断写反了。</turn>')
+  expect(call.prompt).toContain('<turn role="assistant" latest="true">已经修好了，原因是时区判断写反了。</turn>')
   // suggestion lands in the placeholder with the accept-key marker
   await waitFor(() => fixture.editor.placeholder === ` [→] ${SUGGESTION}`)
   await waitFor(() => fixture.sessionRemoveCalls.length === 1)
