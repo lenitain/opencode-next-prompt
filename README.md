@@ -2,7 +2,7 @@
 
 Predicts your next message after the assistant replies and shows it at the prompt — accept it with a keypress (like Claude Code's "next message suggestion").
 
-Requires OpenCode **≥ 2.0.22** (V2 plugin API). The 2.0.22 floor is required for child sessions (`parentID`), which let the prediction inherit the project's location and resolve project-scoped models.
+Requires OpenCode **≥ 2.1.4** (latest V2 plugin API).
 
 ## Install
 
@@ -22,7 +22,7 @@ opencode plugin add opencode-next-prompt
 
 Restart opencode. The package is installed automatically; OpenCode provides the host plugin/OpenTUI packages.
 
-> In OpenCode 2.0.22+, plugins listed in `opencode.json(c)` that expose a TUI part are loaded automatically; `cli.json` remains for CLI-only plugins. `opencode plugin add` writes the package to the global `opencode.json`.
+> Plugins listed in `opencode.json(c)` that expose a TUI part are loaded automatically; `cli.json` remains for CLI-only plugins. `opencode plugin add` writes the package to the global `opencode.json`.
 >
 > The plugin declares `@opencode/*` and `@opentui/*` as optional peer dependencies; OpenCode provides them at runtime.
 
@@ -30,7 +30,7 @@ Restart opencode. The package is installed automatically; OpenCode provides the 
 
 - After each reply, a suggested next message appears at the input in gray, prefixed with the accept key
 - Press the accept key (**→** by default) while the input is empty to fill it; with text in the input, the key keeps its normal cursor behavior
-- Typing hides the suggestion; clearing the input brings it back. It is discarded when a new turn starts, the conversation is reverted or compacted, or the session changes
+- The suggestion belongs to the turn. Typing, opening a dialog, or switching to the shell prompt only hides it; clear the input, close the dialog, or return to the prompt and it is still there. Accepting fills the input without consuming it, so deleting the accepted text reveals the same suggestion again. It is discarded when a new turn starts, the conversation is reverted or compacted, or the session changes. A pending permission/form dialog or a queued message means the next action is already decided, so no prediction is made
 - Accepting inserts the suggestion text without the ` [→] ` marker. A long suggestion can be visually truncated by the editor even though the full text is inserted
 
 ## Config
@@ -55,10 +55,10 @@ Restart opencode. The package is installed automatically; OpenCode provides the 
 | Key | Default | Description |
 |---|---|---|
 | `acceptKey` | `right` | Key to accept the suggestion (only effective while the input is empty). Invalid values fall back to the default with a warning |
-| `timeoutMs` | `20000` | Per-prediction timeout, 1000–300000 ms. The timed-out call is aborted and the attempt is retried once |
+| `timeoutMs` | `20000` | Per-prediction timeout, 1000–300000 ms. The timed-out call is aborted; there is no retry |
 | `model` | unset | Fast model for predictions as `provider/model` (or `provider/model#variant`); a bare model id uses the session's provider (then a configured agent provider, or a unique matching provider). Falls back to `agents["next-prompt"].model`, then `agents.title.model` in `opencode.json(c)`, then the current session's model. Unknown providers, models, and variants are reported with an error toast instead of running a silently wrong prediction |
 | `variant` | auto | Model variant (reasoning effort) used for predictions. By default the lowest variant the model supports is picked automatically (e.g. `none`, `minimal`, `min`, `low`); models without variants are left untouched. Set it explicitly (e.g. `"high"`) to override, or `"default"` to disable variants entirely |
-| `includeToolContext` | `false` | Include summarized tool calls and outputs in the prediction context (more context, more tokens, and tool output is sent to the prediction provider) |
+| `includeToolContext` | `false` | Include the last completed tool's input and output in the prediction context. The tool name and its success/failure are always included; without this option, no tool content is sent |
 
 You can also configure the prediction model per-project or globally in `opencode.json(c)` under `agents` (or rely on `agents.title.model`, which is used automatically when `agents["next-prompt"]` is not set):
 
@@ -81,13 +81,20 @@ The accept command is registered as `opencode-next-prompt.accept`, so it can be 
 
 ## How it works
 
-After each reply, the plugin predicts your next input from the recent conversation (the last few turns plus the original goal). It creates a temporary, tool-denied child session beneath the active session and runs `session.generate` there. The child inherits the active session's exact location — including its workspace — so project-scoped providers and models resolve, while deny-all permissions strip tools, skills, and MCP instructions from the request. `session.generate` does not write to session history, so the main conversation is never modified, and the helper session is removed after the call.
+A prediction is made when the session is idle, no permission or form dialog is waiting, and no message is queued. Typing, focus changes, and shell mode do not cancel it: they only keep the placeholder from being drawn, because they are visibility concerns, not decisions about the message. The call is aborted only when the turn changes (a new execution, revert, compaction, or session switch). Accepting only fills the input; deleting the text reveals the same suggestion again.
 
-Failed or timed-out predictions are retried once. Starting a new turn, reverting, compacting, or switching sessions cancels the in-flight prediction and the pending retry. A failed helper creation falls back to `session.generate` on the active session, and finally to the global `generate.text`; the fallback paths do not have deny-all permissions, so upgrade to 2.0.22+ for the isolated path.
+The context is the decision situation, not a flat transcript slice:
+
+- the recent exchange, with the latest assistant reply kept at full fidelity — its ending (the question, proposal, or result the user is about to answer) always survives the budget
+- older assistant turns reduced to their final prose paragraph; past user messages keep more detail than past assistant messages
+- fenced code collapsed to a `[code: N lines, language]` fact
+- the last completed tool's name and outcome, plus its input/output only when `includeToolContext` is enabled
+
+One call runs in a disposable, tool-denied child session beneath the active session. The child inherits the active session's exact location — including its workspace — so project-scoped providers and models resolve, while deny-all permissions strip tools, skills, and MCP instructions from the request. `session.generate` does not write to session history, so the main conversation is never modified, and the helper session is removed after the call. There is no retry and no fallback path: a failed or timed-out call produces no suggestion for that turn.
 
 ## Privacy
 
-Each suggestion is one extra model call. The recent conversation is sent to the prediction model, which may be a different provider than the main session's model. With `includeToolContext` enabled, summarized tool calls and outputs are sent too. Use a local or trusted provider for sensitive projects. Debug logs contain session/model metadata and lengths, not transcript text.
+Each suggestion is one extra model call. The recent conversation is sent to the prediction model, which may be a different provider than the main session's model. With `includeToolContext` enabled, the last completed tool's input and output are sent too; otherwise only its name and outcome are included. Use a local or trusted provider for sensitive projects. Debug logs contain session/model metadata and lengths, not transcript text.
 
 ## Debugging
 
@@ -116,8 +123,9 @@ Release steps: bump `package.json` and `CHANGELOG.md`, run `bun run check && bun
 ## Limitations
 
 - The prompt has no plugin slot for an inline hint, so the suggestion is written into the input placeholder. This relies on OpenTUI's placeholder semantics and structural editor detection; a host UI change can break it.
-- Shell mode is detected through the keymap mode with an English placeholder fallback. If either changes upstream, verify that the accept key never inserts text into a shell command.
+- Shell mode is detected through the keymap mode. If that changes upstream, verify that the accept key never inserts text into a shell command.
 - Predictions are only generated for the focused session; switching to another tab/session starts a fresh prediction on its next turn.
+- The suggestion is only drawn while the prompt is focused, empty, and not in shell mode. It is kept otherwise, so returning to the prompt reveals it.
 
 ## License
 

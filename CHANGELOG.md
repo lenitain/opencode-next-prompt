@@ -5,6 +5,25 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Changed
+
+- **Suggestion lifecycle**: a prediction is made when the session is idle, no permission or form dialog is waiting, and no message is queued. Typing, focus changes, and shell mode only hide the suggestion; they do not cancel an in-flight call or discard a ready one. Accepting fills the input without consuming it, so deleting the accepted text reveals the same suggestion again. The suggestion is keyed by its turn, not by what the user did; a new turn, revert, compaction, or session switch discards it
+- **Situation context instead of a flat transcript**: the prompt now carries the recent exchange with the latest assistant reply kept at full fidelity, older assistant turns reduced to their final prose paragraph, fenced code collapsed to a `[code: N lines, language]` fact, and the last completed tool's name and outcome (input/output only with `includeToolContext`). The latest assistant reply's ending is the one invariant the budget never cuts, because it holds the question, proposal, or result the user is about to answer. There is no session origin anchor: the first message is often a dead topic, and stale context would pull the prediction backwards
+- **One call, no retry, no fallback**: predictions run once in a disposable, tool-denied child session and are removed afterwards. Timeouts abort the call instead of retrying; a failed helper creation no longer falls back to the active session or to the global `generate.text` (which cannot resolve project-scoped models)
+- **Output**: a prediction that exceeds 170 characters is cut at a clause boundary; if no boundary exists, no suggestion is shown. The prompt asks for `NO_SUGGESTION` when the next message is not strongly implied, because silence costs less than noise
+- **Cleanup**: helper removal is idempotent, bounded, and also runs when a helper is created after the deadline or aborted mid-flight
+
+### Removed
+
+- The 800 ms retry, the timeout retry budget, the runtime version-warning toast, and the active-session/global fallback chain
+- **Older-host compatibility**: the OpenTUI 0.5 `getLayoutNode().markDirty()` fallback, the OpenCode 2.0.x `session.idle` event without a session id, the guards for a missing `session.create`/`generate`/`remove`, and the shell placeholder heuristic for hosts without a keymap mode. The plugin now requires OpenCode ≥ 2.1.4 (OpenTUI ≥ 0.6)
+
+### Testing
+
+- Rewrote the conversation, predictor, and plugin suites around the new contract: tail preservation, tiered retention, code collapse, tool facts, dialog/queued blocking, suggestion preservation across typing/focus/shell, accept/deletion round-trip, no retry, and helper cleanup
+
 ## [0.2.0] - 2026-10-31
 
 ### Fixed
