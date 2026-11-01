@@ -4,6 +4,8 @@ Predicts your next message after the assistant replies and shows it at the promp
 
 Requires OpenCode **≥ 2.1.4** (latest V2 plugin API).
 
+Predictions need a non-free model: OpenCode Zen free models (`opencode/*-free`) are **not supported** because of an [upstream bug](#limitations).
+
 ## Install
 
 Add to `~/.config/opencode/cli.json`:
@@ -56,7 +58,7 @@ Restart opencode. The package is installed automatically; OpenCode provides the 
 |---|---|---|
 | `acceptKey` | `right` | Key to accept the suggestion (only effective while the input is empty). Invalid values fall back to the default with a warning |
 | `timeoutMs` | `20000` | Per-prediction timeout, 1000–300000 ms. The timed-out call is aborted; there is no retry |
-| `model` | unset | Fast model for predictions as `provider/model` (or `provider/model#variant`); a bare model id uses the session's provider (then a configured agent provider, or a unique matching provider). Falls back to `agents["next-prompt"].model`, then `agents.title.model` in `opencode.json(c)`, then the current session's model. Unknown providers, models, and variants are reported with an error toast instead of running a silently wrong prediction |
+| `model` | unset | Fast model for predictions as `provider/model` (or `provider/model#variant`); a bare model id uses the session's provider (then a configured agent provider, or a unique matching provider). Falls back to `agents["next-prompt"].model`, then `agents.title.model` in `opencode.json(c)`, then the current session's model. Do not point this at an `opencode/*-free` model (see [Limitations](#limitations)). Unknown providers, models, and variants are reported with an error toast instead of running a silently wrong prediction |
 | `variant` | auto | Model variant (reasoning effort) used for predictions. By default the lowest variant the model supports is picked automatically (e.g. `none`, `minimal`, `min`, `low`); models without variants are left untouched. Set it explicitly (e.g. `"high"`) to override, or `"default"` to disable variants entirely |
 | `includeToolContext` | `false` | Include the last completed tool's input and output in the prediction context. The tool name and its success/failure are always included; without this option, no tool content is sent |
 
@@ -122,6 +124,7 @@ Release steps: bump `package.json` and `CHANGELOG.md`, run `bun run check && bun
 
 ## Limitations
 
+- **OpenCode Zen free models (`opencode/*-free`) are not supported for predictions — this is an upstream bug.** The Zen free-tier gateway only accepts model requests that carry OpenCode's full default tool set, while a prediction deliberately strips every tool from its helper session. So each prediction on a free model is refused with a misleading `Free usage limit reached` error and that turn silently shows no suggestion; the main conversation on the same free model is unaffected. The gateway rejects a legitimate request made from inside OpenCode, which the plugin cannot work around from its side (tracked upstream as [anomalyco/opencode#49723](https://github.com/anomalyco/opencode/issues/49723)). Configure a non-free prediction model (`model`, `agents["next-prompt"].model`, or `agents.title.model`) to use the plugin.
 - The prompt has no plugin slot for an inline hint, so the suggestion is written into the input placeholder. This relies on OpenTUI's placeholder semantics and structural editor detection; a host UI change can break it.
 - Shell mode is detected through the keymap mode. If that changes upstream, verify that the accept key never inserts text into a shell command.
 - Predictions are only generated for the focused session; switching to another tab/session starts a fresh prediction on its next turn.

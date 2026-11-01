@@ -1,6 +1,6 @@
 {
   "name": "opencode-next-prompt",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "description": "Predicts your next message after the assistant replies in OpenCode — accept it with a keypress",
   "type": "module",
   "exports": {

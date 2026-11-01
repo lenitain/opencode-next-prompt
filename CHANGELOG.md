@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.3.0] - 2026-11-01
+
 ### Changed
 
 - **Suggestion lifecycle**: a prediction is made when the session is idle, no permission or form dialog is waiting, and no message is queued. Typing, focus changes, and shell mode only hide the suggestion; they do not cancel an in-flight call or discard a ready one. Accepting fills the input without consuming it, so deleting the accepted text reveals the same suggestion again. The suggestion is keyed by its turn, not by what the user did; a new turn, revert, compaction, or session switch discards it
@@ -19,6 +21,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - The 800 ms retry, the timeout retry budget, the runtime version-warning toast, and the active-session/global fallback chain
 - **Older-host compatibility**: the OpenTUI 0.5 `getLayoutNode().markDirty()` fallback, the OpenCode 2.0.x `session.idle` event without a session id, the guards for a missing `session.create`/`generate`/`remove`, and the shell placeholder heuristic for hosts without a keymap mode. The plugin now requires OpenCode ≥ 2.1.4 (OpenTUI ≥ 0.6)
+
+### Docs
+
+- Documented that OpenCode Zen free models (`opencode/*-free`) cannot power predictions: the upstream free-tier gateway rejects the tool-stripped prediction request with a misleading `Free usage limit reached` error ([anomalyco/opencode#49723](https://github.com/anomalyco/opencode/issues/49723)), so a non-free prediction model is required
 
 ### Testing
 
