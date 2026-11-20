@@ -27,6 +27,7 @@ After each reply, a suggested next message appears in gray at the input, prefixe
 - Press the accept key while the input is empty to fill it in. With text in the input, the key keeps its normal cursor behavior.
 - The suggestion belongs to the turn: typing, opening a dialog, or switching to the shell prompt only hides it. It is dropped when a new turn starts, the conversation is reverted or compacted, or the session changes.
 - Accepting fills the input without consuming the suggestion — delete the accepted text and it comes back.
+- With [`autoSubmit`](#configuration) enabled, a ready suggestion is filled in and submitted like pressing Enter after `autoSubmitDelayMs` without keyboard activity. Any keypress or paste cancels it for that suggestion, and it never runs while the prompt is not focused, is non-empty, is in shell mode, or a dialog/queued message is present.
 - Nothing is predicted while a permission/form dialog is open or a message is queued: the next action is already decided.
 - A prediction is one short line (at most 170 characters). The editor may visually truncate it, but the full text is inserted.
 
@@ -42,20 +43,24 @@ After each reply, a suggested next message appears in gray at the input, prefixe
         "timeoutMs": 20000,
         "model": "my-provider/fast-model",
         "variant": "low",
-        "includeToolContext": false
+        "includeToolContext": false,
+        "autoSubmit": false,
+        "autoSubmitDelayMs": 30000
       }
     }
   ]
 }
 ```
 
-| Option | Default | Description |
-|---|---|---|
-| `acceptKey` | `right` | Key that accepts the suggestion (only effective while the input is empty). |
-| `timeoutMs` | `20000` | Timeout per prediction, 1000–300000 ms. A timed-out prediction is dropped; there is no retry. |
-| `model` | session model | Model used for predictions, as `provider/model` (or `provider/model#variant`). See [Prediction model](#prediction-model). |
-| `variant` | auto | Reasoning effort for predictions. By default the model's lowest variant is used. Set it explicitly (e.g. `"high"`) or use `"default"` to disable variants. |
-| `includeToolContext` | `false` | Also send the last completed tool's input and output to the prediction model. |
+| Option               | Default       | Description                                                                                                                                                |
+| -------------------- | ------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `acceptKey`          | `right`       | Key that accepts the suggestion (only effective while the input is empty).                                                                                 |
+| `timeoutMs`          | `20000`       | Timeout per prediction, 1000–300000 ms. A timed-out prediction is dropped; there is no retry.                                                              |
+| `model`              | session model | Model used for predictions, as `provider/model` (or `provider/model#variant`). See [Prediction model](#prediction-model).                                  |
+| `variant`            | auto          | Reasoning effort for predictions. By default the model's lowest variant is used. Set it explicitly (e.g. `"high"`) or use `"default"` to disable variants. |
+| `includeToolContext` | `false`       | Also send the last completed tool's input and output to the prediction model.                                                                              |
+| `autoSubmit`         | `false`       | Automatically fill in and submit a ready suggestion after the inactivity delay. Any keypress or paste cancels it for that suggestion.                      |
+| `autoSubmitDelayMs`  | `30000`       | Inactivity delay before `autoSubmit`, 1000–600000 ms. Only used when `autoSubmit` is enabled.                                                              |
 
 Invalid values fall back to the default and are reported with a warning toast.
 
@@ -72,13 +77,13 @@ Every suggestion is a separate model call, so it is worth pointing it at a fast 
 {
   "agents": {
     "title": {
-      "model": "my-provider/fast-model"
+      "model": "my-provider/fast-model",
     },
     "next-prompt": {
       "model": "my-provider/fast-model",
-      "hidden": true
-    }
-  }
+      "hidden": true,
+    },
+  },
 }
 ```
 

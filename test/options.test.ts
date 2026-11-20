@@ -14,6 +14,8 @@ test("normalizeOptions trims strings and accepts valid values", () => {
     model: " acme/fast ",
     variant: " high ",
     includeToolContext: true,
+    autoSubmit: true,
+    autoSubmitDelayMs: 45_000,
   })
   expect(options).toEqual({
     acceptKey: "ctrl+n",
@@ -21,6 +23,8 @@ test("normalizeOptions trims strings and accepts valid values", () => {
     model: "acme/fast",
     variant: "high",
     includeToolContext: true,
+    autoSubmit: true,
+    autoSubmitDelayMs: 45_000,
   })
   expect(warnings).toEqual([])
 })
@@ -32,12 +36,16 @@ test("normalizeOptions rejects values that would break setup", () => {
     model: 42,
     variant: "",
     includeToolContext: "false",
+    autoSubmit: "true",
+    autoSubmitDelayMs: 500,
   })
   expect(options).toEqual(DEFAULT_OPTIONS)
-  expect(warnings).toHaveLength(4)
+  expect(warnings).toHaveLength(6)
   expect(warnings.join("\n")).toContain("acceptKey")
   expect(warnings.join("\n")).toContain("timeoutMs")
   expect(warnings.join("\n")).toContain("includeToolContext")
+  expect(warnings.join("\n")).toContain("autoSubmit must be a boolean")
+  expect(warnings.join("\n")).toContain("autoSubmitDelayMs")
 })
 
 test("normalizeOptions rejects non-key accept values", () => {

@@ -3,6 +3,7 @@ import type { Context, KeymapLayer } from "@opencode/plugin/tui/context"
 import type { Renderable } from "@opentui/core"
 import { createSuggestionStore } from "./state.ts"
 import { createPredictor } from "./predict.ts"
+import { createAutoSubmit, type AutoSubmitSuggestion } from "./auto-submit.ts"
 import { createPlaceholderController, isShellMode } from "./ui.ts"
 import { asPromptTextarea } from "./editor.ts"
 import { normalizeOptions } from "./options.ts"
@@ -34,6 +35,13 @@ const opencodeNextPrompt = Plugin.define({
 
     const placeholder = createPlaceholderController(context, store, () => currentSessionID(), options.acceptKey)
     const predictor = createPredictor(context.client, { timeoutMs: options.timeoutMs })
+    const autoSubmit = options.autoSubmit
+      ? createAutoSubmit({
+          delayMs: options.autoSubmitDelayMs,
+          store,
+          submit: (suggestion) => runAutoSubmit(suggestion),
+        })
+      : undefined
 
     function currentSessionID(): string | undefined {
       const route = context.ui.router.current()
@@ -199,6 +207,60 @@ const opencodeNextPrompt = Plugin.define({
       }, 0)
     }
 
+    /**
+     * The inactivity timer fired: submit only if the suggestion is still the
+     * current turn's, the prompt is focused, empty, and in normal mode, and no
+     * dialog or queued message has decided the next action in the meantime.
+     */
+    function runAutoSubmit(suggestion: AutoSubmitSuggestion): void {
+      if (disposed) return
+      const current = store.read()
+      if (
+        current.kind !== "ready" ||
+        current.sessionID !== suggestion.sessionID ||
+        current.turnKey !== suggestion.turnKey
+      ) {
+        debug("auto submit skipped", "suggestion changed")
+        return
+      }
+      if (suggestion.sessionID !== currentSessionID()) {
+        debug("auto submit skipped", "session changed")
+        return
+      }
+      const blocker = decisionPoint(suggestion.sessionID)
+      if (blocker) {
+        debug("auto submit skipped", blocker)
+        return
+      }
+      if (isShellMode(context)) {
+        debug("auto submit skipped", "shell mode")
+        return
+      }
+      const editor = focusedPrompt()
+      if (!editor) {
+        debug("auto submit skipped", "prompt not focused")
+        return
+      }
+      if (editor.plainText !== "") {
+        debug("auto submit skipped", "prompt not empty")
+        return
+      }
+
+      debug("auto submitting", { sessionID: suggestion.sessionID, length: suggestion.text.length })
+      editor.insertText(suggestion.text)
+      editor.invalidateIntrinsicSize()
+      editor.gotoBufferEnd()
+      context.renderer.requestRender()
+      try {
+        // `prompt.submit` is the host command behind Enter. Dispatch is the
+        // same path the `tui.command.execute` event uses, so the host flushes
+        // the editor into its prompt state and sends it like a normal turn.
+        context.keymap.dispatch("prompt.submit")
+      } catch (error) {
+        debug("auto submit dispatch failed", errorMessage(error))
+      }
+    }
+
     // The accept command itself; registered from the app slot render below
     // (keymap layers need a live solid owner — see the slot comment).
     const acceptLayer = (): KeymapLayer => ({
@@ -228,6 +290,17 @@ const opencodeNextPrompt = Plugin.define({
     })
 
     placeholder.start()
+
+    // Any keyboard or paste activity means the user is present: never submit
+    // on their behalf for this suggestion. The timer is armed when the
+    // suggestion becomes ready, so a keystroke before that is irrelevant.
+    const keyInput = options.autoSubmit ? context.renderer.keyInput : undefined
+    const onUserActivity = (): void => autoSubmit?.cancel("user activity")
+    if (autoSubmit) {
+      keyInput?.on("keypress", onUserActivity)
+      keyInput?.on("paste", onUserActivity)
+      autoSubmit.start()
+    }
 
     // `context.keymap.layer` resolves through useContext, so it needs an
     // active solid owner under the host's Keymap.Provider. Plugin setup runs
@@ -328,6 +401,9 @@ const opencodeNextPrompt = Plugin.define({
     return () => {
       disposed = true
       for (const off of unsubscribers) off()
+      keyInput?.off("keypress", onUserActivity)
+      keyInput?.off("paste", onUserActivity)
+      autoSubmit?.dispose()
       placeholder.dispose()
       disposeSlot()
       store.discard()

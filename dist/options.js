@@ -2,9 +2,13 @@ export const DEFAULT_OPTIONS = {
     acceptKey: "right",
     timeoutMs: 20_000,
     includeToolContext: false,
+    autoSubmit: false,
+    autoSubmitDelayMs: 30_000,
 };
 const MIN_TIMEOUT_MS = 1_000;
 const MAX_TIMEOUT_MS = 300_000;
+const MIN_AUTO_SUBMIT_DELAY_MS = 1_000;
+const MAX_AUTO_SUBMIT_DELAY_MS = 600_000;
 const INVALID_KEYS = new Set(["", "none", "false"]);
 /**
  * Plugin options come from JSON and are untyped at runtime. Reject values that
@@ -39,6 +43,26 @@ export function normalizeOptions(raw) {
         else
             warnings.push(`includeToolContext must be a boolean (got ${describe(source.includeToolContext)}); using ${includeToolContext}`);
     }
+    let autoSubmit = DEFAULT_OPTIONS.autoSubmit;
+    if (source.autoSubmit !== undefined) {
+        if (typeof source.autoSubmit === "boolean")
+            autoSubmit = source.autoSubmit;
+        else
+            warnings.push(`autoSubmit must be a boolean (got ${describe(source.autoSubmit)}); using ${autoSubmit}`);
+    }
+    let autoSubmitDelayMs = DEFAULT_OPTIONS.autoSubmitDelayMs;
+    if (source.autoSubmitDelayMs !== undefined) {
+        const value = source.autoSubmitDelayMs;
+        if (typeof value === "number" &&
+            Number.isFinite(value) &&
+            value >= MIN_AUTO_SUBMIT_DELAY_MS &&
+            value <= MAX_AUTO_SUBMIT_DELAY_MS) {
+            autoSubmitDelayMs = Math.round(value);
+        }
+        else {
+            warnings.push(`autoSubmitDelayMs must be a number between ${MIN_AUTO_SUBMIT_DELAY_MS} and ${MAX_AUTO_SUBMIT_DELAY_MS} (got ${describe(value)}); using ${autoSubmitDelayMs}`);
+        }
+    }
     return {
         options: {
             acceptKey,
@@ -46,6 +70,8 @@ export function normalizeOptions(raw) {
             model: readString(source.model, "model", warnings),
             variant: readString(source.variant, "variant", warnings),
             includeToolContext,
+            autoSubmit,
+            autoSubmitDelayMs,
         },
         warnings,
     };

@@ -82,10 +82,12 @@ function createFixture(options: Record<string, unknown> = {}) {
   const subscribed = new Map<string, Handler[]>()
   const listeners: Array<(event: { details: { type: string; data?: unknown } }) => void> = []
   const rendererHandlers = new Map<string, Array<(...args: any[]) => void>>()
+  const keyHandlers = new Map<string, Array<(...args: any[]) => void>>()
   const toasts: any[] = []
   const sessionCreateCalls: any[] = []
   const sessionRemoveCalls: any[] = []
   const sessionGenerateCalls: any[] = []
+  const dispatched: string[] = []
   const layers: Array<() => any> = []
   const editor = makeTextarea()
   let focused: any = editor
@@ -126,6 +128,18 @@ function createFixture(options: Record<string, unknown> = {}) {
         if (index >= 0) current.splice(index, 1)
       },
       requestRender() {},
+      keyInput: {
+        on(type: string, handler: (...args: any[]) => void) {
+          const list = keyHandlers.get(type) ?? []
+          list.push(handler)
+          keyHandlers.set(type, list)
+        },
+        off(type: string, handler: (...args: any[]) => void) {
+          const current = keyHandlers.get(type) ?? []
+          const index = current.indexOf(handler)
+          if (index >= 0) current.splice(index, 1)
+        },
+      },
     },
     client: {
       session: {
@@ -209,6 +223,9 @@ function createFixture(options: Record<string, unknown> = {}) {
       layer: (factory: () => any) => {
         layers.push(factory)
       },
+      dispatch: (id: string) => {
+        dispatched.push(id)
+      },
     },
   } as unknown as Context
 
@@ -221,6 +238,7 @@ function createFixture(options: Record<string, unknown> = {}) {
     sessionGenerateCalls,
     layers,
     subscribed,
+    dispatched,
     set agents(value: any[]) {
       agents = value
     },
@@ -269,6 +287,9 @@ function createFixture(options: Record<string, unknown> = {}) {
     },
     fireRenderer(type: string, ...args: unknown[]) {
       for (const handler of rendererHandlers.get(type) ?? []) handler(...args)
+    },
+    fireKey(type: string, ...args: unknown[]) {
+      for (const handler of keyHandlers.get(type) ?? []) handler(...args)
     },
     renderSlot() {
       slotClaim.render({})
@@ -736,6 +757,59 @@ test("session.idle triggers a prediction when the status event is missing", asyn
 
   fixture.fire("session.idle", { sessionID: SESSION_ID })
   await waitFor(() => fixture.sessionCreateCalls.length === 1)
+
+  if (typeof cleanup === "function") await cleanup()
+})
+
+test("autoSubmit fills and submits a ready suggestion after the inactivity delay", async () => {
+  const fixture = createFixture({ autoSubmit: true, autoSubmitDelayMs: 1_000 })
+  const cleanup = await plugin.setup(fixture.context)
+  fixture.renderSlot()
+
+  fixture.fire("session.status", idleEvent)
+  await waitFor(() => fixture.editor.placeholder === MARKER)
+  expect(fixture.dispatched).toEqual([])
+
+  await waitFor(() => fixture.dispatched.length === 1, 2_000)
+  expect(fixture.dispatched).toEqual(["prompt.submit"])
+  expect(fixture.editor.inserted).toEqual([SUGGESTION])
+  expect(fixture.editor.plainText).toBe(SUGGESTION)
+
+  if (typeof cleanup === "function") await cleanup()
+})
+
+test("keypress activity cancels a pending autoSubmit without discarding the suggestion", async () => {
+  const fixture = createFixture({ autoSubmit: true, autoSubmitDelayMs: 1_000 })
+  const cleanup = await plugin.setup(fixture.context)
+  fixture.renderSlot()
+
+  fixture.fire("session.status", idleEvent)
+  await waitFor(() => fixture.editor.placeholder === MARKER)
+
+  fixture.fireKey("keypress", { name: "a" })
+  await sleep(1_100)
+
+  expect(fixture.dispatched).toEqual([])
+  expect(fixture.editor.inserted).toEqual([])
+  expect(fixture.editor.placeholder).toBe(MARKER)
+  expect(acceptCommand(fixture).enabled()).toBe(true)
+
+  if (typeof cleanup === "function") await cleanup()
+})
+
+test("autoSubmit never submits over an existing draft", async () => {
+  const fixture = createFixture({ autoSubmit: true, autoSubmitDelayMs: 1_000 })
+  const cleanup = await plugin.setup(fixture.context)
+  fixture.renderSlot()
+
+  fixture.editor.plainText = "别动我的草稿"
+  fixture.fire("session.status", idleEvent)
+  await waitFor(() => fixture.editor.placeholder === MARKER)
+  await sleep(1_100)
+
+  expect(fixture.dispatched).toEqual([])
+  expect(fixture.editor.inserted).toEqual([])
+  expect(fixture.editor.plainText).toBe("别动我的草稿")
 
   if (typeof cleanup === "function") await cleanup()
 })

@@ -5,7 +5,11 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [0.3.1] - 2026-11-20
+
+### Added
+
+- **Optional auto-submit**: `autoSubmit` (default `false`) fills a ready suggestion into the prompt and submits it like Enter after `autoSubmitDelayMs` (default `30000`, 1000–600000 ms) without keyboard activity. Any keypress or paste cancels the pending submit while keeping the suggestion available; the timer also skips a prompt that is unfocused, non-empty, in shell mode, or blocked by a dialog or queued message
 
 ## [0.3.0] - 2026-11-01
 

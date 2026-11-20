@@ -4,6 +4,8 @@ export type Options = {
     model?: string;
     variant?: string;
     includeToolContext: boolean;
+    autoSubmit: boolean;
+    autoSubmitDelayMs: number;
 };
 export declare const DEFAULT_OPTIONS: Options;
 /**
